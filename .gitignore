@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+# Conda / venv
+.venv/
+venv/
+envs/
+
+# Training outputs
+grokking_runs/
+checkpoints/
+runs/
+wandb/
+*.pt
+*.pth
+*.npz
+*.npy
+
+# External repos cloned for reference
+entropy-sgd/
+
+# IDE
+.vscode/
+.idea/
+
+# OS / Windows artifacts
+.DS_Store
+Thumbs.db
+*:Zone.Identifier
+
+# Local scratch
+scratch/
+tmp/
+.env

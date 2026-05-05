@@ -1,0 +1,25 @@
+# Core scientific stack
+numpy==2.4.3
+scipy==1.17.1
+pandas==3.0.1
+matplotlib==3.10.8
+seaborn==0.13.2
+scikit-learn==1.8.0
+plotly==6.6.0
+
+# Deep learning support (NOT torch — install per-machine)
+einops==0.8.2
+
+# Research-specific
+devinterp==1.3.2
+wandb==0.25.1
+
+# Notebooks & dev
+jupyter
+ipykernel
+nbformat==5.10.4
+nbstripout==0.9.1
+
+# Misc
+tqdm==4.67.3
+pydantic==2.12.5
