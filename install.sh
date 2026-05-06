@@ -36,6 +36,10 @@ fi
 echo "==> Installing project dependencies..."
 pip install -r requirements.txt
 
+echo ""
+echo "==> Configuring nbstripout..."
+nbstripout --install
+
 # Verify
 echo ""
 echo "==> Verifying installation..."
