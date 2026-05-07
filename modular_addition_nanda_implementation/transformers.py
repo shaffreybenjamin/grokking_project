@@ -15,7 +15,7 @@ import time
 import torch.nn.functional as F
 import einops
 import random 
-import helpers 
+import modular_addition_nanda_implementation.helpers as helpers 
 from dataclasses import dataclass
 import os
 import wandb
