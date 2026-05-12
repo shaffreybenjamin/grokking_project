@@ -1,0 +1,495 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usepackage{natbib}
+\usepackage{microtype}
+
+\geometry{margin=1in}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!70!black,
+    citecolor=blue!70!black,
+    urlcolor=blue!70!black
+}
+
+\newtheorem{definition}{Definition}
+\newtheorem{hypothesis}{Hypothesis}
+
+\title{\textbf{Why Does Grokking Happen?} \\ 
+\large A Mechanistic Account via Singular Learning Theory, \\
+Computational Mechanics, and Training Dynamics}
+
+\author{Benjamin Shaffrey \\
+MSc Artificial Intelligence \& MSc Mathematics}
+
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We propose a research programme to give a precise, mechanistically grounded answer to the question ``why does grokking happen?'' Our approach synthesises four complementary frameworks: (1) the local learning coefficient (LLC) from singular learning theory, which tracks the effective complexity of the model's position in parameter space throughout training; (2) belief state geometry from computational mechanics, which tracks the formation of predictive representations in the model's activations; (3) data attribution via unrolling, which identifies which training examples drive parameter changes at each moment; and (4) dynamical systems analysis of the training trajectory, which characterises the basin structure and identifies the bifurcation governing the transition. We study grokking primarily in a minimal transformer trained on modular addition, where the learned algorithm is mechanistically understood and the computational mechanics framework has been recently developed, and secondarily in a two-layer MLP on the same task, where belief geometry serves as the primary tool for algorithm identification.
+
+Our central thesis is that grokking is a transition from the lazy regime (where the Neural Tangent Kernel is approximately fixed and the model memorises via kernel interpolation) to the rich regime (where features are learned and the model discovers task-adapted representations). This transition can be triggered by any mechanism that induces feature learning---weight decay, small output scale, balanced initialisation---and the effective laziness of the model, rather than any single hyperparameter, is the true bifurcation parameter. The LLC should track this transition universally: high in the lazy regime, dropping during the transition, low at the generalising solution. Beyond explaining grokking, the project aims to establish belief state geometry as a model-agnostic tool for identifying learned algorithms, and to investigate whether SGD in singular models has an intrinsic simplicity bias expressible in terms of the LLC.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%----------------------------------------------------------------------
+\section{Introduction and Motivation}
+%----------------------------------------------------------------------
+
+Grokking---the phenomenon whereby a neural network first memorises its training data and only much later generalises to unseen examples---was first identified by \citet{power2022grokking} in small transformers trained on algorithmic tasks including modular addition. Despite substantial subsequent work characterising the \emph{what} of grokking (which circuits form, what progress measures track the transition), a precise answer to \emph{why} grokking occurs---why the transition is delayed, why it is sharp, and what mechanistically drives it---remains open.
+
+Recent work by \citet{kumar2024grokking} has significantly reframed the problem. They demonstrate that grokking can occur \emph{without} weight decay and with increasing parameter norm, both in a two-layer MLP on polynomial regression and on modular addition with a one-layer transformer. The two fundamental control parameters they identify are (1) the output scale $\alpha$, which controls the rate of feature learning (large $\alpha$ pushes the model into the lazy/kernel regime, delaying grokking), and (2) NTK-task alignment, which controls how much feature learning is necessary. Weight decay is one of several mechanisms that can trigger the lazy-to-rich transition---it forces the NTK to evolve \citep{lewkowycz2020large}---but it is neither special nor necessary. \citet{domine2025lazy} provide exact analytical solutions for the learning dynamics in deep linear networks as a function of the relative scale parameter $\lambda$ (the difference in weight covariance between layers), showing that $\lambda = 0$ yields rich/sigmoidal dynamics while $|\lambda| \to \infty$ yields lazy/exponential dynamics. Their work demonstrates that the transition between regimes is controlled by a complex interaction of architecture, relative scale, and absolute scale.
+
+We propose to study grokking in two settings:
+
+\begin{enumerate}[label=(\roman*)]
+    \item \textbf{A single-layer, single-head transformer trained on modular addition modulo a prime $p$.} This setting is uniquely favourable because the learned algorithm is mechanistically understood \citep{nanda2023progress, chughtai2023toy, yip2024modular, wu2024unified}: the model implements a Fourier-based algorithm. \citet{poncini2025compmech} has provided a computational mechanics characterisation of this algorithm, identifying the precise predictive vectors linearly represented at each position in the residual stream. The model is small (${\sim}100$k parameters) and the dataset is finite ($p^2$ examples), making rigorous analysis feasible.
+
+    \item \textbf{A two-layer MLP on the same modular addition task.} \citet{kumar2024grokking} demonstrate grokking in this simpler architecture, and the analytical RLCT is substantially more tractable here (closer to existing results on layered neural networks by Watanabe and Aoyagi). Crucially, the learned algorithm \emph{cannot} be read from the weights as cleanly as in the transformer, making belief geometry the primary tool for algorithm identification---and thus a strong test of its model-agnostic applicability.
+\end{enumerate}
+
+This project can be understood as a concrete instantiation of the ``S4 correspondence'' articulated by \citet{pepinlehalleur2025youare}: \emph{statistical structure} in the data (the group-theoretic structure of modular addition) shapes the \emph{geometric structure} of the loss landscape (singularity structure measured by the LLC), which determines the \emph{developmental structure} of the learning process (the lazy-to-rich transition), which produces the \emph{algorithmic structure} in the learned model (the Fourier algorithm identified by belief geometry). Our contribution is to track all four levels simultaneously in a single, controlled setting.
+
+Our central hypothesis is:
+
+\begin{hypothesis}[Lazy-to-Rich Transition Hypothesis]
+Grokking occurs because the model begins training in the lazy regime---where the NTK is approximately fixed, the model memorises via kernel interpolation, and the LLC is high---and any mechanism that forces feature learning (weight decay, small output scale $\alpha$, balanced initialisation, appropriate learning rate) destabilises this lazy regime, triggering a transition to the rich regime where the model discovers task-adapted representations with lower LLC. The memorisation phase corresponds to the lazy regime; the delay is the time for feature learning to begin; the sharpness reflects self-reinforcing feature learning once it starts.
+\end{hypothesis}
+
+The bifurcation governing grokking is parameterised not by any single hyperparameter but by the \emph{effective laziness} of the model---a function of weight decay $\kappa$, output scale $\alpha$, initialisation scale $\sigma_{\mathrm{init}}$, and $\lambda$-balancedness---together with the NTK-task alignment, which determines whether laziness is a problem at all.
+
+%----------------------------------------------------------------------
+\section{Background}
+%----------------------------------------------------------------------
+
+\subsection{The Model and Task}
+
+\paragraph{Transformer.} We study a single-layer, single-head transformer with residual stream dimension $d_{\mathrm{model}} = 128$, MLP hidden dimension $d_{\mathrm{mlp}} = 512$, vocabulary size $|\mathcal{X}_p| = p + 1$ (including a BOS token), and context length $n_{\mathrm{ctx}} = 3$. The model is trained on sequences $\texttt{BOS}\, a\, b\, c$ where $c = a + b \bmod p$, with cross-entropy loss computed only on the final token position. Following \citet{power2022grokking}, we use $p = 113$ and train with full-batch gradient descent using AdamW (learning rate $10^{-3}$, weight decay $1.0$). Training proceeds for 25,000 epochs.
+
+\paragraph{Two-layer MLP.} Following \citet{kumar2024grokking}, we also study a two-layer MLP $f(x; \theta) = \alpha \cdot W_2 \sigma(W_1 x)$ on the same modular addition task, where $\alpha$ is the output scale and $\sigma$ is a nonlinear activation. This architecture enables controlled sweeps over $\alpha$ to modulate the lazy-to-rich transition, and its simpler structure makes analytical RLCT calculations more feasible.
+
+\subsection{The Lazy-to-Rich Transition}
+
+The lazy regime \citep{chizat2019lazy, jacot2018neural} occurs when the model remains near its linearised form during training, with the NTK approximately fixed. The model behaves as a kernel method and fits training data via kernel interpolation without learning task-specific features. This produces memorisation when the initial NTK is not well-aligned with the task.
+
+The rich regime \citep{saxe2014exact, domine2025lazy} is characterised by an evolving NTK, non-convex dynamics that navigate saddle points, sigmoidal learning curves, and simplicity biases such as low-rankness. The model learns task-adapted features.
+
+\citet{kumar2024grokking} show that grokking is the transition between these regimes. Multiple factors control this transition: the output scale $\alpha$ (large $\alpha$ $\to$ lazy), weight decay $\kappa$ (forces NTK evolution at rate $O(\kappa)$ per \citet{lewkowycz2020large}), initialisation scale, and $\lambda$-balancedness \citep{domine2025lazy}. A second independent parameter, the NTK-task alignment, determines whether the lazy solution generalises: if the initial NTK is well-aligned with the task, the lazy regime itself generalises and no transition (and hence no grokking) is necessary.
+
+\subsection{The Learned Algorithm: From Fourier Modes to Group Representations}\label{sec:background_algo}
+
+\paragraph{The GCR algorithm.} \citet{chughtai2023toy} generalise Nanda et al.'s Fourier multiplication algorithm from cyclic groups to arbitrary finite groups via the \emph{Group Composition via Representations} (GCR) algorithm. For any finite group $G$ with irreducible representations $\rho_1, \ldots, \rho_k$, the algorithm proceeds: (1) the embedding layer maps group elements $a, b$ to representation matrices $\rho(a), \rho(b)$; (2) the MLP layer uses ReLU activations to compute $\rho(a)\rho(b) = \rho(ab)$; (3) the unembedding reads off logits via characters $\chi_\rho(abc^{-1}) = \mathrm{tr}(\rho(abc^{-1}))$, which are maximised when $c = ab$. The Fourier algorithm of \citet{nanda2023progress} is literally a special case: each Fourier frequency $\omega_k$ corresponds to an irreducible 2D rotation representation of the cyclic group $C_p$, and the logit $\cos(2\pi\omega_k(a+b-c)/p) = \frac{1}{2}\chi_{\rho_k}(abc^{-1})$.
+
+\citet{chughtai2023toy} find evidence for \emph{weak but not strong universality}: all models use variants of GCR, but the specific representations chosen and the order they develop vary across random seeds and architectures. Notably, they observe multiple phases of grokking (their Figure~14), with different representations locking in at different times.
+
+\paragraph{The coset circuit alternative.} \citet{stander2024grokking} challenge the GCR interpretation. Studying the same networks trained on $S_5$ and $S_6$, they argue that models implement \emph{coset circuits}: each neuron specialises in recognising whether the product $\sigma_l \sigma_r$ falls in a specific coset of a specific subgroup, rather than computing matrix products of representations. The model discovers the true subgroup structure of the group. The embeddings encode coset membership (not representation matrices), and the linear layer combines this information via the predictable multiplication properties of conjugate subgroups' cosets.
+
+The tension with GCR arises because coset membership functions correlate with characters of irreducible representations (Stander et al., Appendix~E), so Fourier-space evidence is consistent with both interpretations. The disagreement is about what the neurons \emph{actually compute}: matrix multiplication of representations (GCR) vs.\ coset membership testing (cosets).
+
+\paragraph{The $\rho$-set unification.} \citet{wu2024unified} partially unify these accounts by identifying \emph{$\rho$-set circuits}: within each irreducible representation $\rho$, the key vectors organising the neurons form a $\rho$-set---an orbit of $G$ acting on vectors via $\rho$. This is more structured than GCR (which leaves the relationship between neurons within a representation unconstrained) and connects to the coset interpretation ($\rho$-sets of the standard representation of $S_n$ correspond to cosets of $S_{n-1}$). They also show (Appendix~F) that the causal interventions used by \citet{stander2024grokking} are insufficient to distinguish the algorithms: the same intervention results hold for $\mathbb{Z}/53\mathbb{Z}$, which has no non-trivial subgroups. Their most significant methodological contribution is \emph{compact proofs}: translating the mechanistic interpretation into a formal verifier that guarantees model accuracy faster than brute-force evaluation, providing quantitative verification that informal ablations cannot.
+
+\paragraph{Implications for this project.} This ongoing debate---three papers reverse-engineering the same networks with partially conflicting conclusions---directly motivates the belief geometry approach. Belief geometry does not depend on how one interprets weights; it depends only on the input-output map and intermediate representations. If the model is implementing coset circuits, the belief geometry at the hidden layer should show clustering by coset membership (discrete, combinatorial structure). If it is implementing GCR, the geometry should show continuous representation-theoretic structure (matrix elements of representations). These are distinguishable geometries, and the computational mechanics framework provides a principled way to read them off.
+
+\subsection{Computational Mechanics Perspective}
+
+\citet{poncini2025compmech} introduces two generative processes for modular addition:
+
+\paragraph{RRMod$_p$ (HMM).} The exact process, whose transition matrices $T^{(x)}_p$ are defined via the permutation representation $\rho_\sigma$ of the cyclic group $C_p$. The predictive vectors lie on the vertices of a $(p{-}1)$-simplex $\mathcal{S}_p = \{\langle e^{(i)}_p | : i = 0, \ldots, p{-}1\}$.
+
+\paragraph{sRRMod$_p$ (EHMM).} An approximate process whose transition matrices $H^{(x)}_p$ are defined via 2D rotation representations $\rho_{\gamma}^{(\omega)}$ of $C_p$ at frequencies $\omega_1, \ldots, \omega_n$. The predictive vectors lie on the vertices of $n$ distinct $p$-gons. The logits take the form
+\begin{equation}\label{eq:logits}
+    z(abc) = \sum_{k=1}^{n} \frac{\alpha_k^2}{p^2} \cos\!\left(\frac{2\pi \omega_k (a + b - c)}{p}\right).
+\end{equation}
+
+The key empirical finding is that the trained transformer linearly represents the EHMM predictive vectors $\langle v^{(\cdot)}|$, \emph{not} the HMM predictive vectors $\langle e^{(\cdot)}_p|$ ($R^2 = 0.99$ vs.\ $R^2 = 0.09$). The residual stream decomposition is:
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Position} & \textbf{Decoded predictive vector} \\
+\midrule
+Post-embedding, position $a$ & $\langle v^{(a)} |$ \\
+Post-embedding, position $b$ & $\langle v^{(b)} |$ \\
+Post-attention, position $b$ & $\langle v^{(a)} | + \langle v^{(b)} |$ \\
+Post-MLP, position $b$ & $\langle v^{(a+b \bmod p)} |$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Singular Learning Theory and the Local Learning Coefficient}
+
+In singular learning theory (SLT) \citep{watanabe2009algebraic}, the free energy of a statistical model admits the asymptotic expansion
+\begin{equation}
+    F_n = n L_n(w^*) + \lambda \ln n - (m-1) \ln \ln n + O(1),
+\end{equation}
+where $\lambda$ is the real log canonical threshold (RLCT) and $m$ is the multiplicity. The RLCT measures the effective complexity of the model in the neighbourhood of the current solution: lower $\lambda$ corresponds to a simpler, more degenerate region of parameter space.
+
+The local learning coefficient (LLC) is a practice-facing estimator of $\lambda$, computed via SGLD sampling around a given checkpoint. In developmental interpretability \citep{hoogland2024developmental}, the LLC is tracked throughout training to identify phase transitions in the model's effective complexity.
+
+\paragraph{RLCT of deep linear networks.} \citet{pepinlehalleur2025geometry} recently showed that for deep linear networks (DLNs) with loss $K^{\mathrm{DLN}}_B(A_*) = \|\mathrm{mult}(A) - B\|_2^2$, the RLCT takes the clean form
+\begin{equation}
+    \mathrm{rlct}(K^{\mathrm{DLN}}_B) = \frac{\mathrm{codim}\,\mathrm{mult}^{-1}(B)}{2},
+\end{equation}
+meaning DLNs are ``mildly singular''---the RLCT saturates the upper bound $\mathrm{rlct}(F) \leq \mathrm{codim}\,F^{-1}(0)/2$ that holds for general real analytic functions. This result, which reformulates and clarifies earlier work by \citet{aoyagi2024consideration}, provides an exact baseline for our analytical RLCT programme: the gap between the linear RLCT and the actual nonlinear RLCT for the two-layer MLP measures the contribution of the nonlinearity to the singularity structure. They also establish a surprising permutation invariance: the codimension (and hence the RLCT) depends on the \emph{multiset} of layer widths, not their ordering.
+
+\paragraph{Compression-based complexity.} \citet{demoss2025complexity} independently track the complexity dynamics of grokking using a measure based on rate-distortion theory and Kolmogorov complexity. Their approach coarse-grains network weights via low-rank decomposition and quantisation, then measures the compressed description length. They observe the same rise-then-fall complexity pattern we predict for the LLC: complexity increases during memorisation and falls sharply during generalisation, while unregularised networks remain trapped at high complexity indefinitely. Their measure is deterministic and reproducible, complementing the stochastic SGLD-based LLC estimation, and we adopt it as a triangulation tool (see \cref{sec:triangulation}).
+
+\subsection{Data Attribution via Unrolling}
+
+The unrolling framework \citep{bae2024source, jaburi2026data} treats training as a composition of differentiable update maps and computes the sensitivity of final-model observables to perturbations of individual training example weights:
+\begin{equation}\label{eq:unrolling}
+    \frac{\partial w_T(\beta)}{\partial \beta_i}\bigg|_{\beta=\mathbf{1}} = -\sum_{t=0}^{T-1} \frac{\eta_t}{n}\, \mathbf{1}[i \in B_t]\, J_{(t+1):T}\, \nabla_w L(w_t, z_i),
+\end{equation}
+where $J_{(t+1):T} = \prod_{s=t+1}^{T-1} J_s$ is the ordered product of step Jacobians $J_t = I - \eta_t \hat{H}_t$. For full-batch GD, the indicator $\mathbf{1}[i \in B_t] = 1$ for all $i$ and $t$, and the formula is deterministic.
+
+%----------------------------------------------------------------------
+\section{Research Questions}
+%----------------------------------------------------------------------
+
+\begin{enumerate}[label=\textbf{RQ\arabic*.}, leftmargin=2.5em]
+    \item \textbf{Can belief geometry identify learned algorithms model-agnostically?} If we apply the computational mechanics framework to both the transformer and the two-layer MLP trained on modular addition, do they exhibit the same belief geometry at convergence (indicating the same learned algorithm) or different geometries (indicating different algorithms)? Can the belief geometry of the MLP be used to reverse-engineer the algorithm learned in the weights, where direct weight analysis is not available? Does the belief geometry decompose by model component, revealing which component is responsible for which part of the algorithm? Can belief geometry resolve the ongoing GCR vs.\ coset circuit debate \citep{chughtai2023toy, stander2024grokking, wu2024unified} by distinguishing continuous representation-theoretic structure from discrete coset clustering at the hidden layer?
+
+    \item \textbf{What is the complexity profile of grokking?} How does the LLC evolve throughout training, and does the grokking transition correspond to a sharp drop in the LLC? Is this drop universal across different mechanisms for triggering grokking (weight decay, output scale $\alpha$, $\lambda$-balancedness)? How does the LLC decompose across model components (embedding, attention, MLP, unembedding)?
+
+    \item \textbf{What is the representational trajectory of grokking?} How does the belief state geometry (the EHMM predictive vectors) form during training? In what order do the different components of the algorithm develop, and does this ordering correlate with the component-wise LLC transitions?
+
+    \item \textbf{What drives the transition causally?} Which training examples are most influential at each stage of grokking, and through which model components do they act? Does the data attribution pattern shift qualitatively from diffuse (memorisation/lazy-type) to structured (group-theoretic) during the transition?
+
+    \item \textbf{What is the dynamical mechanism?} Can grokking be characterised as a transition from a lazy regime (fixed NTK, high LLC, unstructured belief geometry) to a rich regime (evolving NTK, low LLC, structured belief geometry)? Is the memorisation phase the lazy regime, and is the generalisation phase the rich regime?
+
+    \item \textbf{What is the bifurcation parameter?} Is there an effective laziness parameter---a function of weight decay $\kappa$, output scale $\alpha$, initialisation scale $\sigma_{\mathrm{init}}$, and $\lambda$-balancedness---that governs the bifurcation? Does the grokking delay collapse onto a single curve when plotted against this effective parameter? What is the role of NTK-task alignment as a second, independent axis?
+
+    \item \textbf{How do causal attribution and complexity reduction interact?} Do the natural data partitions identified by the unrolling attribution (clusters of examples with correlated influence) predict the subsets for which the data-refined LLC drops earliest? Can the unrolling be used to discover, rather than assume, the data partitions most relevant to the complexity transition?
+
+    \item \textbf{Does SGD in singular models have an intrinsic simplicity bias?} Is the lazy-to-rich transition evidence that SGD is biased toward low-LLC solutions? Does the LLC reliably decrease during training across all mechanisms that induce feature learning, even when parameter norm increases?
+\end{enumerate}
+
+%----------------------------------------------------------------------
+\section{Methodology}
+%----------------------------------------------------------------------
+
+\subsection{Experimental Setup}
+
+All experiments use full-batch gradient descent (eliminating stochastic batch noise) to obtain a deterministic dynamical system. For the transformer, the architecture and hyperparameters follow \citet{poncini2025compmech}: single-layer single-head transformer, $d_{\mathrm{model}} = 128$, $d_{\mathrm{mlp}} = 512$, $p = 113$, AdamW with learning rate $10^{-3}$ and weight decay $1.0$, trained for 25,000 epochs. For the two-layer MLP, the setup follows \citet{kumar2024grokking} with controlled output scale $\alpha$. Checkpoints are saved every 10--50 epochs.
+
+\subsection{Step 1: Belief Geometry as Algorithm Identification}\label{sec:belief}
+
+This is the primary and most novel contribution of the project. We apply the computational mechanics framework to both the transformer and the two-layer MLP, using belief geometry to identify and compare the algorithms learned in each architecture.
+
+\paragraph{Transformer belief geometry.} At each checkpoint, decode the sRRMod$_p$ predictive vectors from model activations at each residual stream position identified in \citet{poncini2025compmech}:
+\begin{enumerate}[label=(\alph*)]
+    \item \textbf{Post-embedding pre-attention (positions $a$ and $b$):} Fit activations to $\langle v^{(a)}|$ and $\langle v^{(b)}|$ via PCA followed by linear regression. Track $R^2$ and visualise the circle formation at each frequency $\omega_k$.
+    \item \textbf{Post-attention pre-MLP (position $b$):} Fit activations to $\langle v^{(a)}| + \langle v^{(b)}|$. Track when the additive structure appears.
+    \item \textbf{Post-MLP pre-unembedding (position $b$):} Fit activations to $\langle v^{(a+b \bmod p)}|$. Track when the modular sum representation forms.
+\end{enumerate}
+
+At each checkpoint, we also fit to the HMM simplex predictive vectors $\langle e_p^{(ab)}|$ as a control, verifying that the model never represents these.
+
+\paragraph{MLP belief geometry.} Apply the same computational mechanics framework to the two-layer MLP. For each input $(a, b)$, the predictive state vector is the model's output distribution $P(c | a, b)$. The geometry of these vectors---how they cluster, what manifolds they form, what symmetries they respect---reveals the equivalence classes the model is computing, even though the algorithm cannot be read from the weights directly.
+
+The component-wise decomposition for the MLP is: after the first layer $h = \sigma(W_1 x)$, compute the intermediate predictive states using the conditional distribution over outputs given $h$. This reveals what intermediate representation the MLP has learned. If the hidden-layer predictive states show circular/Fourier structure, the MLP is using a Fourier-like representation internally. If they show a different structure (e.g., clustering by residue classes without circular arrangement), the MLP is using a fundamentally different algorithm.
+
+\paragraph{Cross-architecture comparison.} Compare the converged belief geometries of the transformer and MLP:
+\begin{enumerate}[label=(\alph*)]
+    \item If the geometries match, both architectures have learned the same algorithm (likely Fourier multiplication), suggesting this is the unique simplest generalising solution preferred by SGD regardless of architecture.
+    \item If the geometries differ but are both structured, the architectures have learned different algorithms. The geometry itself identifies what each algorithm is. The LLC at convergence then reveals which algorithm is ``simpler'' in the SLT sense.
+    \item If one geometry is structured and the other unstructured, the architectures differ in their capacity to learn structured solutions for this task.
+\end{enumerate}
+
+This comparison establishes belief geometry as a model-agnostic tool for algorithm identification---one that works on architectures where direct weight analysis fails.
+
+\paragraph{Resolving the GCR vs.\ coset debate.} The GCR/coset controversy (\cref{sec:background_algo}) provides a concrete test case for belief geometry's discriminating power. At the hidden layer of models trained on $S_5$, if the model implements GCR, the intermediate predictive states should show continuous representation-theoretic structure (matrix elements of $\rho(ab)$ organising smoothly within each irreducible representation). If it implements coset circuits, the hidden-layer geometry should show discrete clustering by coset membership, with neurons specialising in specific subgroup-coset pairs. The $\rho$-set interpretation of \citet{wu2024unified} predicts an intermediate structure: orbits under the group action via $\rho$, which are discrete but representation-theoretically organised.
+
+\paragraph{Extension to non-abelian groups.} To strengthen the test, we extend the belief geometry analysis to models trained on $S_5$ multiplication (following the setup of \citet{chughtai2023toy, stander2024grokking, wu2024unified}). For non-abelian groups, the algorithm space is richer---the group has multiple non-isomorphic irreducible representations of varying dimension, and the GCR/coset ambiguity is most acute. The belief geometry for $S_5$ should reflect the $\rho$-set structure: orbits under irreducible representations, with the specific representations selected varying across seeds (weak universality). Comparing the belief geometry of the MLP and transformer trained on $S_5$ would be a particularly strong test of model-agnostic algorithm identification.
+
+\paragraph{Compact proofs as verification.} Following \citet{wu2024unified}, if belief geometry identifies the algorithm, this identification can in principle be formalised as a compact proof of model accuracy. Construct idealised parameters from the belief geometry description and verify that the idealised model achieves high accuracy faster than brute-force evaluation. This provides quantitative verification stronger than $R^2$ fits or ablations alone.
+
+\paragraph{Per-frequency decomposition.} Track the $R^2$ of the fit to each individual circle component at frequency $\omega_k$ (or more generally, each irreducible representation $\rho$) separately, to determine whether different representations lock in at different times during the grokking transition. \citet{chughtai2023toy} observe that different representations emerge at different training stages, sometimes producing multiple phases of grokking; this predicts that the LLC curve may show multiple steps corresponding to sequential representation learning.
+
+\subsection{Step 2: LLC Tracking During Training}\label{sec:llc}
+
+At each checkpoint, we estimate the LLC via SGLD sampling around the current parameters, using the \texttt{devinterp} library.
+
+\paragraph{Global LLC.} SGLD with full-batch gradient evaluation (feasible since $p^2 = 12{,}769$ examples). Multiple independent chains with $\hat{R}$ convergence diagnostics. Hyperparameter sweeps over step size, localisation strength $\gamma$, and chain length to verify stability of the LLC estimate.
+
+\paragraph{Component-wise LLC.} Freeze all model components except one (embedding, attention, MLP, or unembedding) and estimate the LLC over the free component's parameters only. This decomposes the global complexity transition into per-component contributions and reveals whether components undergo their transitions simultaneously or sequentially.
+
+\paragraph{Representation-refined LLC.} Further decompose within components: for the embedding, estimate the LLC over the subspace corresponding to each learned frequency $\omega_k$ (or irreducible representation $\rho$); for the attention, separate the QK circuit ($W_Q^\top W_K$) from the OV circuit ($W_O W_V$). Since \citet{chughtai2023toy} observe that different representations lock in at different training stages---sometimes producing multiple distinct phases of grokking---the representation-refined LLC should show sequential drops corresponding to the sequential emergence of each representation circuit. This connects the developmental interpretability perspective (when does complexity change?) to the mechanistic interpretability perspective (which circuit is forming?).
+
+\paragraph{Data-refined LLC.} Estimate the LLC using subsets of the training data to determine whether the complexity transition occurs uniformly across the data or proceeds in a structured fashion. The choice of data partition is itself a methodological question: one could partition a priori by algebraic structure (e.g., by the value of $a + b \bmod p$, or by $a$ alone), but the model may organise the data along axes that do not correspond to any single obvious algebraic quantity. We address this by using the unrolling-based attribution (Step~3) to discover the natural partitions empirically, as described in \cref{sec:synthesis}.
+
+\paragraph{Universality across mechanisms.} A key prediction is that the LLC drop should occur regardless of which mechanism triggers the lazy-to-rich transition. We track LLC curves across sweeps of weight decay $\kappa$, output scale $\alpha$, $\lambda$-balancedness, and spectral entropy regularisation \citep{demoss2025complexity}. The spectral entropy regulariser $\mathcal{L}_{\mathrm{reg}}(\theta) = \beta H_{\mathrm{svd}}(\theta)$ penalises the effective rank of weight matrices directly, providing a qualitatively different mechanism from weight decay or output scaling---it targets complexity rather than indirectly forcing feature learning. If the LLC drop is universal even under this regulariser, that strengthens the case for universality.
+
+\subsection{Step 2b: Compression-Based Complexity Triangulation}\label{sec:triangulation}
+
+At each checkpoint where we compute the LLC, we also compute the lossy compression complexity of \citet{demoss2025complexity} (Algorithm~1 of their paper: low-rank decomposition + quantisation + lossless compression via bzip2). This provides a deterministic, reproducible complexity measure that does not rely on SGLD convergence. If both measures track the grokking transition consistently---rising during memorisation, falling during generalisation---this provides independent validation of each and addresses the methodological concern about SGLD reliability. Disagreement would be informative about what each measure is actually capturing: the LLC reflects loss landscape singularity structure, while the compression measure reflects weight-space compressibility. The relationship between these connects to the MDL-SLT correspondence established in \citet{hoogland2025compressibility}.
+
+\subsection{Step 3: Data Attribution via Unrolling}\label{sec:unrolling}
+
+Using the unrolling framework, compute the influence of each training example $z_i = (a, b, a{+}b \bmod p)$ on the test loss at each training step.
+
+Since training uses full-batch GD, the unrolling formula \eqref{eq:unrolling} is deterministic and exact. For computational feasibility, we use the SOURCE approximation \citep{bae2024source}: divide training into $L$ segments at checkpoints, apply the stationarity approximation within each segment, and use the matrix exponential approximation for segment Jacobians. The resulting filter
+\begin{equation}
+    F_r(\sigma) = \frac{1 - e^{-\bar{\eta} K \sigma}}{\sigma}
+\end{equation}
+provides principled damping determined by the training process itself (learning rate $\bar{\eta}$, segment length $K$, Hessian eigenvalue $\sigma$).
+
+\paragraph{Attribution structure analysis.} At each stage of training, examine whether the attribution pattern is (a) diffuse---each example contributes roughly equally, consistent with the lazy/memorisation regime---or (b) structured---examples sharing algebraic structure (e.g., the same value of $a + b \bmod p$) are correlated in their influence, consistent with the model exploiting group structure in the rich regime.
+
+\paragraph{Component-wise attribution.} Decompose the Jacobians into per-component contributions to track which training examples drive changes in which model components at each stage. The examples most influential on the embedding should be those that help organise the circles; the examples most influential on the MLP should be those that help learn the modular sum.
+
+\paragraph{Attribution clustering.} At each checkpoint, collect the per-example attribution vectors into a matrix (rows indexed by training examples, columns by parameter directions). Cluster this matrix (e.g., via spectral clustering or $k$-means on the attribution vectors) to identify groups of training examples that exert correlated influence on the model. During the lazy/memorisation phase, we expect these clusters to be unstructured; as the model transitions to the rich/generalisation regime, we expect clusters to align with the algebraic structure of modular addition. The evolution of this clustering provides a data-driven decomposition of the training set that reflects the model's internal organisation at each point in training.
+
+\subsection{Step 4: Synthesis---Unrolling-Informed Data-Refined LLC}\label{sec:synthesis}
+
+A central methodological contribution of this project is the use of unrolling-based attribution to inform the data-refined LLC analysis. These two frameworks are connected at a fundamental level: the unrolling propagates per-example influence through the step Jacobians $J_t = I - \eta \hat{H}_t$, and the LLC is determined by the Hessian eigenspectrum that defines these same Jacobians. The two frameworks are reading off different aspects of the same curvature structure: the LLC integrates over it to produce a scalar complexity measure, while the unrolling uses it to propagate per-example influence vectors.
+
+This connection motivates the following workflow at each checkpoint:
+
+\begin{enumerate}[label=(\roman*)]
+    \item \textbf{Compute unrolling attributions} for all training examples, obtaining a matrix of per-example attribution vectors.
+    \item \textbf{Cluster the attribution vectors} to identify natural data partitions---groups of examples that the model treats similarly at this point in training. These clusters need not correspond to any a priori algebraic partition; they reflect the model's internal organisation.
+    \item \textbf{Compute the data-refined LLC} for each identified cluster. This measures the effective complexity of the model with respect to each group of examples separately.
+    \item \textbf{Track the co-evolution} of the attribution structure and the per-cluster LLC. The prediction is that clusters whose attribution pattern shifts from diffuse to group-theoretically structured are precisely the clusters whose data-refined LLC drops.
+\end{enumerate}
+
+If this correspondence holds, it establishes a direct link between the causal drivers of the grokking transition (which examples are pushing the model toward the rich regime) and the complexity reduction that constitutes the transition (which subsets of the loss landscape are becoming simpler). This would provide a unified causal-complexity account: specific training examples drive the model toward a region of parameter space where the loss landscape, restricted to the data those examples represent, has lower effective dimension.
+
+\subsection{Step 5: Dynamical Systems Analysis and Bifurcation}\label{sec:dynamics}
+
+We treat training as a deterministic dynamical system $f : \mathbb{R}^d \to \mathbb{R}^d$ (the full-batch update map) and characterise the basin structure, the lazy-to-rich transition, and the bifurcation.
+
+\paragraph{Identifying the effective laziness parameter.} The bifurcation governing grokking is parameterised not by any single hyperparameter but by an \emph{effective laziness} $L(\kappa, \alpha, \sigma_{\mathrm{init}}, \lambda)$ together with the NTK-task alignment $A$.
+
+To identify $L$ empirically, we run a 2D sweep over output scale $\alpha$ and weight decay $\kappa$, recording the grokking delay $\tau$ (epochs until test accuracy exceeds a threshold, or $\infty$ if grokking does not occur). The level curves of $\tau$ in the $(\alpha, \kappa)$ plane reveal the functional form of $L$: if the level curves are straight lines with slope $s$ in log-log space, then $L \propto \kappa / \alpha^s$. Once a candidate $L$ is identified, we verify collapse: all $(\alpha, \kappa)$ combinations should fall on a single curve $\tau(L)$. Adding initialisation scale $\sigma_{\mathrm{init}}$ and $\lambda$-balancedness as additional axes tests whether $L$ captures the full effective laziness.
+
+The functional form of $\tau(L)$ near the critical value $L^*$ identifies the bifurcation type: $\tau \sim |L - L^*|^{-1/2}$ suggests a saddle-node bifurcation; $\tau \sim -\log|L - L^*|$ suggests a transcritical bifurcation.
+
+\paragraph{NTK-task alignment as a second axis.} The NTK-task alignment $A$ is measured via kernel-target alignment (KTA):
+\begin{equation}
+    \mathrm{KTA} = \frac{\langle K, yy^\top \rangle_F}{\|K\|_F \|yy^\top\|_F},
+\end{equation}
+where $K$ is the NTK matrix at initialisation. High alignment means the lazy solution generalises; low alignment means it does not. We sweep both $L$ and $A$ to map the bifurcation surface: the boundary of the grokking region in the $(L, A)$ plane. The LLC should only show the characteristic drop-then-plateau in the grokking region of this plane.
+
+\paragraph{Control experiment: no feature learning.} Train with large $\alpha$ (ensuring lazy dynamics) and confirm that the model memorises and remains memorised indefinitely (stable high LLC, unstructured belief geometry, high test loss, fixed NTK). This establishes the lazy/memorisation solution as a genuine stable attractor of the lazy-regime dynamics.
+
+\paragraph{Feature-learning onset experiment.} Train in the lazy regime, then change a control parameter ($\alpha$, weight decay, or $\lambda$-balancedness) to induce feature learning. Track the delay between onset of feature learning and onset of grokking. Measure the LLC, belief geometry, NTK kernel distance, and data attribution throughout.
+
+\paragraph{Reversibility experiment.} Induce feature learning, allow the LLC to begin changing, then revert the control parameter. Determine whether the model re-stabilises in the lazy/memorisation regime (the transition is reversible) or continues to the generalisation solution (a point of no return has been crossed). This maps the basin boundary along the training trajectory.
+
+\paragraph{Stability analysis.} At checkpoints during the lazy/memorisation phase, compute the eigenspectrum of the Jacobian of the update map $J_t = I - \eta \hat{H}_t$. Track how the spectral radius evolves as the effective laziness decreases. The hypothesis predicts that eigenvalues should approach or cross the unit circle as the lazy regime is destabilised.
+
+\paragraph{Basin mapping.} Perturb the fully grokked model's weights and retrain from each perturbation to map the generalisation basin. The generalisation basin is predicted to be small relative to the memorisation/lazy basin, explaining why random initialisation essentially always produces memorisation first.
+
+\paragraph{$\lambda$-balanced initialisation experiment.} Following \citet{domine2025lazy}, initialise the transformer with controlled $\lambda$-balanced weights and sweep $\lambda$ from 0 to large positive/negative values. For each $\lambda$, record: grokking delay, LLC curve, belief geometry evolution, NTK kernel distance from initialisation. The prediction is that small $|\lambda|$ $\to$ short/no lazy phase $\to$ early LLC drop $\to$ early polygon formation $\to$ small/no grokking delay $\to$ large NTK movement.
+
+%----------------------------------------------------------------------
+\section{Expected Outcomes and the Target Narrative}
+%----------------------------------------------------------------------
+
+If the lazy-to-rich transition hypothesis is correct, the combined measurements should support a narrative of the following form, with each claim backed by specific experimental evidence:
+
+\begin{enumerate}[label=\textbf{\arabic*.}]
+    \item \textbf{The memorisation solution is a high-complexity lazy attractor.} In the lazy regime (large $\alpha$, large $|\lambda|$, no weight decay), the model converges to a high-LLC solution with unstructured belief geometry, fixed NTK, and remains there indefinitely. The lazy/memorisation basin is large (most random initialisations lead to it).
+
+    \item \textbf{Feature learning destabilises the lazy regime.} Any mechanism that induces feature learning (weight decay, small $\alpha$, balanced initialisation) causes the NTK to evolve and the LLC to change, reflecting the model being pushed out of the lazy regime. The Jacobian eigenspectrum confirms increasing instability.
+
+    \item \textbf{At a critical point, the model undergoes a phase transition.} The LLC drops sharply. The belief geometry snaps into the polygonal structure predicted by sRRMod$_p$. The NTK kernel distance from initialisation increases rapidly. The data attribution pattern shifts from diffuse to group-theoretically structured.
+
+    \item \textbf{The transition has internal structure.} The component-wise LLC and belief geometry tracking reveal a specific ordering: embeddings organise into circles, then attention learns the additive structure, then the MLP learns the modular sum. Each sub-transition corresponds to a feature in the LLC curve and is driven by specific training examples.
+
+    \item \textbf{The generalisation solution is a low-complexity stable attractor.} After grokking, the LLC stabilises at a lower value. The belief geometry matches the sRRMod$_p$ predictive vectors. The solution is robust to perturbation (large basin, though much smaller than the lazy basin at initialisation).
+
+    \item \textbf{The transition is governed by a bifurcation in effective laziness.} Grokking delay collapses onto a single curve when plotted against the effective laziness parameter $L$, regardless of which individual hyperparameter is varied. The delay diverges at a critical $L^*$, identifying the bifurcation. The NTK-task alignment $A$ determines the boundary of the grokking region in the $(L, A)$ plane.
+
+    \item \textbf{The LLC tracks the transition universally.} The LLC drops during the lazy-to-rich transition regardless of which mechanism triggers it---weight decay, output scale $\alpha$, $\lambda$-balancedness, or initialisation scale. This establishes the LLC as a universal diagnostic for this transition, not tied to any particular regulariser, and provides evidence that SGD in singular models is biased toward low-LLC solutions.
+
+    \item \textbf{Belief geometry identifies the learned algorithm model-agnostically.} The computational mechanics framework reveals the algorithm learned by both the transformer and the MLP. If the geometries match, both architectures learn the same algorithm. If they differ, the geometry reveals what distinct algorithm the MLP has learned, demonstrating belief geometry as a tool for algorithm identification that works where direct weight analysis fails.
+
+    \item \textbf{Data attribution and complexity reduction are two views of the same process.} The natural data partitions identified by clustering the unrolling attribution vectors correspond to the subsets for which the data-refined LLC drops during grokking. Examples whose attribution shifts from diffuse to structured are precisely those whose contribution to the model's effective complexity is decreasing.
+\end{enumerate}
+
+\paragraph{The answer to ``why does grokking happen.''} Grokking occurs because the model begins training in the lazy regime, where it memorises via kernel interpolation with a fixed NTK. The lazy/memorisation solution is a high-complexity attractor with a large basin---most random initialisations lead to it. Any mechanism that forces feature learning (weight decay, small output scale, balanced initialisation) destabilises this lazy regime by causing the NTK to evolve. Once feature learning begins, the model transitions to a low-complexity rich regime where it discovers the task-adapted (Fourier/group-theoretic) generalisation algorithm. The delay is the time for the effective laziness to decrease sufficiently to trigger the transition; the sharpness reflects the self-reinforcing nature of feature learning once it begins. The bifurcation is governed by the effective laziness---a function of weight decay, output scale, initialisation scale, and $\lambda$-balancedness---not by any single hyperparameter. Weight decay is one mechanism among several; the fundamental driver is the onset of feature learning.
+
+%----------------------------------------------------------------------
+\section{Broader Research Programme}
+%----------------------------------------------------------------------
+
+Beyond the specific question of grokking, this project contributes to several broader research directions.
+
+\paragraph{Dynamical vs.\ Bayesian accounts of grokking: a critical distinction.} \citet{pepinlehalleur2025youare} argue that the Bayesian posterior in singular models exhibits an internal model selection mechanism: at finite sample size $n$, the posterior prefers simpler solutions (lower LLC) even if they have higher loss, switching to more complex but accurate solutions as $n$ grows. \citet{carroll2025incl} provide empirical evidence for an analogy between sample size $n$ in Bayesian inference and training steps $t$ in SGD, suggesting that SGD trajectories exhibit a similar preference reversal.
+
+If this analogy held generally, it would predict that the memorising solution has \emph{lower} LLC than the generalising solution---that the model initially memorises because memorisation is simpler, and only transitions to the more complex generalising solution when enough ``effective evidence'' (training steps) accumulates. This is the opposite of our hypothesis, which predicts that the memorising/lazy solution has \emph{higher} LLC (generic, unstructured, high-dimensional kernel interpolation) while the generalising solution has \emph{lower} LLC (exploiting the low-dimensional group structure of the task). \citet{demoss2025complexity} provide direct empirical support for our ordering: their compression-based complexity measure shows that complexity \emph{rises} during memorisation and \emph{falls} during generalisation.
+
+Moreover, the $t \leftrightarrow n$ analogy cannot hold in general. If it did, then any model trained long enough would eventually prefer the complex generalising solution, regardless of initialisation or laziness. But we know empirically that high-laziness models memorise forever---no amount of additional training triggers the transition. The grokking setting thus provides a concrete counterexample to the general $t \leftrightarrow n$ correspondence: the delay is explained by a \emph{dynamical} trap (the lazy regime), not by \emph{statistical} model selection (insufficient evidence to justify complexity).
+
+This project can empirically adjudicate between these accounts. By measuring the LLC at both the memorising and generalising solutions, we can determine the LLC ordering directly. If the memorising solution has higher LLC (as we predict), the Bayesian model selection story does not explain grokking---the model is stuck at a \emph{more complex} solution despite a simpler one existing, which is the opposite of what the Bayesian account predicts. This would cleanly separate the dynamical mechanism (lazy-to-rich transition, governed by effective laziness) from the statistical mechanism (internal model selection, governed by the LLC-loss tradeoff), and demonstrate that they make opposite predictions in at least one concrete setting.
+
+\paragraph{SGD's simplicity bias in singular models.} The above distinction does not mean SGD has no simplicity bias---it means the bias operates through the dynamics, not through Bayesian model selection. The foundational question is whether SGD in singular models has an intrinsic bias toward low-LLC solutions. If SGD consistently transitions from high-LLC to low-LLC solutions whenever feature learning is possible---and the LLC drops even when parameter norm increases (as in \citeauthor{kumar2024grokking}'s no-weight-decay grokking)---this is evidence that SLT complexity, not norm-based complexity, is what SGD is biased toward. But this bias is \emph{dynamical} (SGD trajectories preferentially flow toward low-LLC regions once the lazy regime is escaped) rather than \emph{statistical} (the posterior preferring low-LLC regions at finite $n$).
+
+\paragraph{Belief geometry as model-agnostic algorithm identification.} The most novel methodological contribution is the use of computational mechanics to identify learned algorithms in architectures where direct weight analysis fails. If this works on the two-layer MLP (where we \emph{cannot} read the algorithm from the weights), it establishes a general tool applicable to any architecture. The component-wise decomposition of belief geometry---tracking how the geometry changes across layers---reveals which component is responsible for which part of the algorithm, providing a new form of mechanistic interpretability. \citet{chughtai2023toy} find evidence for weak but not strong universality: all models use the same \emph{family} of algorithms (GCR), but the specific representations chosen vary across seeds. Belief geometry should detect this pattern---same geometric structure type, different specific parameters---and can potentially resolve the GCR vs.\ coset debate by providing a representation-independent view of what the model computes. The extension to non-abelian groups ($S_5$, $S_6$) would provide a much stronger test, since the algorithm space is richer and the interpretive ambiguity most acute.
+
+\paragraph{Developmental interpretability.} This project provides a detailed case study for the developmental interpretability programme, demonstrating how the LLC tracks the lazy-to-rich transition during training and how this transition corresponds to the formation of specific algorithmic structures. The component-wise and data-refined LLC analyses extend the standard LLC methodology. The universality of the LLC signal across different mechanisms for triggering grokking would strengthen the case for LLC as a general-purpose developmental diagnostic.
+
+\paragraph{Computational mechanics and the linear representation hypothesis.} By tracking the belief state geometry throughout training, we connect the computational mechanics perspective (what representations the model \emph{should} form) with the developmental perspective (when and how those representations actually form). The cross-architecture comparison (transformer vs.\ MLP) tests whether the same computational mechanics structure emerges in different architectures.
+
+\paragraph{Analytical LLC for simple models.} As a companion effort, we aim to derive analytical expressions for the RLCT of individual model components. The two-layer MLP is substantially more tractable than the transformer: the singularity structure is related to reduced-rank regression and existing results by Watanabe and Aoyagi on layered neural networks. \citet{pepinlehalleur2025geometry} provide the exact RLCT for deep linear networks, showing that $\mathrm{rlct} = \mathrm{codim}/2$ (the ``mildly singular'' result). For the nonlinear two-layer MLP, the RLCT should be \emph{strictly lower} than this linear baseline, and the gap quantifies the effect of the nonlinearity on the singularity structure. For the transformer, the idealised Fourier logit model~\eqref{eq:logits}---bypassing the transformer entirely and computing the RLCT for the logit function $\sum_k \alpha_k^2 \cos(2\pi\omega_k(a+b-c)/p)$---captures the algorithm's singularity structure and appears genuinely tractable.
+
+%----------------------------------------------------------------------
+\section{Timeline and Feasibility}
+%----------------------------------------------------------------------
+
+\paragraph{Computational requirements.} The transformer has ${\sim}100$k parameters and the dataset has $p^2 \approx 12{,}769$ examples. Full-batch training for 25,000 epochs is feasible on a single GPU (or CPU for small $p$). The two-layer MLP is even cheaper. SGLD-based LLC estimation at each checkpoint is the primary computational cost; we estimate ${\sim}100$ checkpoints $\times$ multiple chains $\times$ ${\sim}1000$ SGLD steps each, which is tractable on a single GPU. The 2D sweeps over $(\alpha, \kappa)$ and $(\lambda, \alpha)$ multiply the number of training runs but each individual run is fast.
+
+\paragraph{Implementation.} The codebase builds on existing infrastructure: \texttt{TransformerLens} or equivalent for model training and activation extraction, \texttt{devinterp} for LLC estimation, and custom code for the belief geometry analysis (PCA + linear regression pipeline) and unrolling-based attribution (SOURCE approximation).
+
+\paragraph{Phased approach.}
+\begin{enumerate}[label=Phase \arabic*:]
+    \item \textbf{Belief geometry: transformer and MLP.} Reproduce Poncini's belief geometry results on the transformer at convergence. Train the two-layer MLP on the same task and compute its belief geometry. Compare the two geometries. Track belief geometry formation throughout training for both architectures. (\emph{Weeks 1--4})
+    \item \textbf{LLC tracking and universality.} Implement LLC tracking throughout training for the transformer. Run sweeps over weight decay $\kappa$, output scale $\alpha$, and $\lambda$-balancedness (following \citet{domine2025lazy}). Verify that the LLC drop occurs universally across mechanisms. Track LLC for the MLP. (\emph{Weeks 4--7})
+    \item \textbf{Bifurcation analysis.} Run the 2D sweep over $(\alpha, \kappa)$ to identify the effective laziness parameter. Compute NTK-task alignment. Map the bifurcation surface in the $(L, A)$ plane. Run the $\lambda$-balanced initialisation experiment. (\emph{Weeks 7--10})
+    \item \textbf{Data attribution and synthesis.} Implement the SOURCE approximation for unrolling-based attribution. Cluster attribution vectors at each checkpoint and use the resulting partitions to compute data-refined LLCs. Verify the correspondence between attribution structure shifts and per-cluster LLC drops. (\emph{Weeks 10--13})
+    \item \textbf{Integration and write-up.} Combine all signals into the target narrative. Produce the unified account. Attempt analytical RLCT derivations for the MLP and idealised Fourier logit model as companion contributions. (\emph{Weeks 13--16})
+\end{enumerate}
+
+%----------------------------------------------------------------------
+% References
+%----------------------------------------------------------------------
+\bibliographystyle{plainnat}
+
+\begin{thebibliography}{99}
+
+\bibitem[Bae et~al.(2024)]{bae2024source}
+Juhan Bae, Wu Lin, Jonathan Lorraine, and Roger Grosse.
+\newblock Training data attribution via approximate unrolled differentiation.
+\newblock \emph{arXiv preprint arXiv:2405.12186}, 2024.
+
+\bibitem[Aoyagi(2024)]{aoyagi2024consideration}
+Miki Aoyagi.
+\newblock Consideration on the learning efficiency of multiple-layered neural networks with linear units.
+\newblock \emph{Neural Networks}, 172(106132):1--11, 2024.
+
+\bibitem[Carroll et~al.(2025)]{carroll2025incl}
+Liam Carroll, Jesse Hoogland, George Wang, Daniel Murfet, and Susan Wei.
+\newblock In-context learning and the geometry of loss landscapes.
+\newblock \emph{arXiv preprint}, 2025.
+
+\bibitem[DeMoss et~al.(2025)]{demoss2025complexity}
+Branton DeMoss, Silvia Sapora, Jakob Foerster, Nick Hawes, and Ingmar Posner.
+\newblock The complexity dynamics of grokking.
+\newblock \emph{arXiv preprint arXiv:2412.09810}, 2025.
+
+\bibitem[Hoogland et~al.(2025)]{hoogland2025compressibility}
+Jesse Hoogland, George Wang, Alexander Gietelink Oldenziel, and Daniel Murfet.
+\newblock Compressibility measures complexity: Minimum description length meets singular learning theory.
+\newblock \emph{arXiv preprint}, 2025.
+
+\bibitem[Pepin Lehalleur et~al.(2025a)]{pepinlehalleur2025youare}
+Simon Pepin~Lehalleur, Jesse Hoogland, Matthew Farrugia-Roberts, Susan Wei, Alexander Gietelink~Oldenziel, George Wang, Liam Carroll, and Daniel Murfet.
+\newblock You are what you eat---{AI} alignment requires understanding how data shapes structure and generalisation.
+\newblock \emph{Preprint, under review}, 2025.
+
+\bibitem[Pepin Lehalleur and Rim\'{a}nyi(2025)]{pepinlehalleur2025geometry}
+Simon Pepin~Lehalleur and Rich\'{a}rd Rim\'{a}nyi.
+\newblock Geometry of the fibers of the multiplication map of deep linear neural networks.
+\newblock \emph{arXiv preprint arXiv:2411.19920}, 2025.
+
+\bibitem[Chizat et~al.(2019)]{chizat2019lazy}
+L\'{e}na\"{i}c Chizat, Edouard Oyallon, and Francis Bach.
+\newblock On lazy training in differentiable programming.
+\newblock \emph{Advances in Neural Information Processing Systems}, 32, 2019.
+
+\bibitem[Chughtai et~al.(2023)]{chughtai2023toy}
+Bilal Chughtai, Lawrence Chan, and Neel Nanda.
+\newblock A toy model of universality: Reverse engineering how networks learn group operations.
+\newblock \emph{arXiv preprint arXiv:2302.03025}, 2023.
+
+\bibitem[Domin\'{e} et~al.(2025)]{domine2025lazy}
+Cl\'{e}mentine C.~J. Domin\'{e}, Nicolas Anguita, Alexandra M. Proca, Lukas Braun, Daniel Kunin, Pedro A.~M. Mediano, and Andrew M. Saxe.
+\newblock From lazy to rich: Exact learning dynamics in deep linear networks.
+\newblock \emph{International Conference on Learning Representations}, 2025.
+
+\bibitem[Hoogland et~al.(2024)]{hoogland2024developmental}
+Jesse Hoogland, George Wang, Matthew Farrugia-Roberts, Liam Carroll, Susan Wei, and Daniel Murfet.
+\newblock Developmental landscape of in-context learning.
+\newblock \emph{arXiv preprint arXiv:2402.02364}, 2024.
+
+\bibitem[Jacot et~al.(2018)]{jacot2018neural}
+Arthur Jacot, Franck Gabriel, and Cl\'{e}ment Hongler.
+\newblock Neural tangent kernel: Convergence and generalization in neural networks.
+\newblock \emph{Advances in Neural Information Processing Systems}, 31, 2018.
+
+\bibitem[Jaburi(2026)]{jaburi2026data}
+Louis Jaburi.
+\newblock Data (attribution) for alignment.
+\newblock \emph{Iliad Intensive lecture notes}, April 2026.
+
+\bibitem[Kumar et~al.(2024)]{kumar2024grokking}
+Tanishq Kumar, Blake Bordelon, Samuel~J. Gershman, and Cengiz Pehlevan.
+\newblock Grokking as the transition from lazy to rich training dynamics.
+\newblock \emph{International Conference on Learning Representations}, 2024.
+
+\bibitem[Lewkowycz and Gur-Ari(2020)]{lewkowycz2020large}
+Aitor Lewkowycz and Guy Gur-Ari.
+\newblock On the training dynamics of deep networks with $L_2$ regularization.
+\newblock \emph{Advances in Neural Information Processing Systems}, 33, 2020.
+
+\bibitem[Nanda et~al.(2023)]{nanda2023progress}
+Neel Nanda, Lawrence Chan, Tom Lieberum, Jess Smith, and Jacob Steinhardt.
+\newblock Progress measures for grokking via mechanistic interpretability.
+\newblock \emph{arXiv preprint arXiv:2301.05217}, 2023.
+
+\bibitem[Poncini(2025)]{poncini2025compmech}
+Xavier Poncini.
+\newblock Computational mechanics for logits.
+\newblock \emph{PIBBSS Report}, October 2025.
+
+\bibitem[Power et~al.(2022)]{power2022grokking}
+Alethea Power, Yuri Burda, Harri Edwards, Igor Babuschkin, and Vedant Misra.
+\newblock Grokking: Generalization beyond overfitting on small algorithmic datasets.
+\newblock \emph{arXiv preprint arXiv:2201.02177}, 2022.
+
+\bibitem[Saxe et~al.(2014)]{saxe2014exact}
+Andrew~M. Saxe, James~L. McClelland, and Surya Ganguli.
+\newblock Exact solutions to the nonlinear dynamics of learning in deep linear neural networks.
+\newblock \emph{International Conference on Learning Representations}, 2014.
+
+\bibitem[Stander et~al.(2024)]{stander2024grokking}
+Dashiell Stander, Qinan Yu, Honglu Fan, and Stella Biderman.
+\newblock Grokking group multiplication with cosets.
+\newblock \emph{Proceedings of the 41st International Conference on Machine Learning}, volume 235 of \emph{Proceedings of Machine Learning Research}, pp.~46441--46467. PMLR, 2024.
+
+\bibitem[Watanabe(2009)]{watanabe2009algebraic}
+Sumio Watanabe.
+\newblock \emph{Algebraic Geometry and Statistical Learning Theory}.
+\newblock Cambridge University Press, 2009.
+
+\bibitem[Wu et~al.(2024)]{wu2024unified}
+William Wu, Lukas Jaburi, Josh Drori, and Jesse Gross.
+\newblock Towards a unified and verified understanding of group-operation networks.
+\newblock \emph{arXiv preprint}, 2024.
+
+\bibitem[Yip et~al.(2024)]{yip2024modular}
+Chi-Hang Yip, Rajashree Agrawal, Lawrence Chan, and Jesse Gross.
+\newblock Modular addition without black-boxes: Compressing explanations of {MLP}s that compute numerical integration.
+\newblock \emph{arXiv preprint}, 2024.
+
+\end{thebibliography}
+
+\end{document}

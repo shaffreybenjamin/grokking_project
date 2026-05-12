@@ -1,0 +1,385 @@
+================================================================================
+PHASE 0 HANDOFF — Grokking Belief Geometry (CompMech) Project
+================================================================================
+
+PURPOSE OF THIS DOCUMENT
+------------------------
+You are picking up a project where Phase 0 (training two architectures to grok
+modular addition) is complete. Your job from here is Phase 1+ (computational
+mechanics / belief geometry analysis on the converged models). This file
+captures the non-obvious decisions, hyperparameters, and conventions that took
+many iterations to settle on, so you don't have to re-derive them.
+
+
+================================================================================
+1. PROJECT CONTEXT
+================================================================================
+
+Goal: study grokking in modular addition through the lens of computational
+mechanics (belief state geometry / EHMM predictive vectors), validated against
+two architectures whose internal algorithms are independently understood.
+
+Long-term aim: use belief geometry as a model-agnostic algorithm-identification
+tool, demonstrated on architectures where the algorithm is already known via
+weights-based analysis (Nanda's transformer mech-interp, Chughtai's MLP
+analysis).
+
+Two computational-mechanics descriptions of the modular-addition process
+(Poncini, 2025):
+  - RRMod_p (HMM): predictive vectors lie on vertices of (p-1)-simplex
+  - sRRMod_p (EHMM): predictive vectors lie on vertices of n distinct p-gons,
+    one per Fourier frequency ω_k
+
+Poncini's main empirical finding: trained transformers linearly represent the
+EHMM predictive vectors ⟨v^(·)|, NOT the simplex HMM predictive vectors ⟨e_p^(·)|.
+At p=113: R² ≈ 0.99 for sRRMod_p vs R² ≈ 0.09 for RRMod_p at post-MLP position.
+
+Phase 0 scope (this document): train both models to grok at matched hparams.
+Phase 1: belief geometry on converged transformer.
+Phase 2: belief geometry on converged MLP.
+Phase 3: cross-architecture comparison.
+Phase 4+ (NOT YET IN SCOPE): developmental / per-checkpoint LLC, wrLLC, SGLD,
+  MAGIC-style data attribution, S5 / non-abelian groups, GCR vs coset.
+
+
+================================================================================
+2. FINAL HYPERPARAMETERS (LANDED AFTER MUCH ITERATION)
+================================================================================
+
+These are in the GrokConfig dataclass at the top of grokking_dual_models.ipynb.
+They were arrived at after extensive testing — DO NOT change them without
+reading section 5 (Things Tried and Rejected).
+
+Common (matched between transformer and MLP):
+  p = 113
+  frac_train = 0.30
+  lr = 1e-3
+  weight_decay = 1.0
+  betas = (0.9, 0.98)
+  optimizer = AdamW
+  full-batch gradient descent
+  seed = 0  (numpy + torch + random.Random for the train/test split)
+  d_model = 128 (transformer's residual stream)
+  d_mlp = 512 (transformer's MLP width)
+  n_ctx = 3
+  num_checkpoints = 200 (roughly log-spaced model snapshots saved to disk)
+
+Transformer-specific (Poncini setup, single-head; matches Nanda recipe with
+single-head simplification):
+  - Single-layer, single-head
+  - No LayerNorm
+  - Q/K/V/O biases: False
+  - MLP biases: True, zero-initialized (Nanda uses biases on MLP only)
+  - Initialization: ALL linear weights ~ N(0, 1/sqrt(d_model)),
+    EXCEPT unembed ~ N(0, 1/sqrt(d_vocab)).
+    The default nn.Linear init (Kaiming-uniform) is sqrt(3) too small; the
+    notebook now overrides it with nn.init.normal_(... std=...). DO NOT revert.
+  - Attention scaling: scores divided by sqrt(d_model // 4) = sqrt(32) = ~5.66.
+    NOT sqrt(d_model). This is the most non-obvious detail in the codebase.
+    Reasoning: Nanda's reference code uses 4 heads with d_head=32, so it scales
+    by sqrt(d_head)=sqrt(32). With our single-head simplification, scaling by
+    sqrt(d_model)=sqrt(128) gave a much "softer" attention temperature, which
+    produced a soft, gradual test-acc ramp instead of the iconic flat-then-jump
+    grokking curve. Hardcoding sqrt(32) recovers Nanda's sharp transition shape
+    while keeping single-head structure.
+  - Sequence convention: (BOS, a, b), BOS = token id p = 113.
+    Loss/prediction at the FINAL position (index 2, the "b" position).
+    Phase 1 decodes at position 1 for ⟨v^(a)| and position 2 for the rest.
+  - 25,000 epochs (more than enough; grokking complete by ~5000)
+
+MLP-specific (Chughtai setup; matches Chughtai, Chan, Nanda 2023):
+  - One hidden layer, ReLU activation, no biases
+  - d_hidden = 256 (NOT the 128 the original project doc suggested)
+    Reasoning: at d_hidden=128, test acc plateaued at 0.996 — barely enough
+    capacity to represent all p/2 ≈ 56 Fourier modes (each needing 2 dims).
+    d_hidden=256 gives comfortable headroom and reaches test_acc = 1.000.
+    Chughtai himself uses d_hidden=256 for A5 in the same paper, so this is
+    well within his explored range and not a deviation from his recipe.
+  - Forward: logits = W_U @ ReLU(W_a @ a + W_b @ b)
+    The summed embedding IS the hidden layer (no separate hidden linearity).
+  - Initialization: W_a, W_b ~ N(0, 1/sqrt(p)); W_U ~ N(0, 1/sqrt(d_hidden))
+  - 50,000 epochs (enough at d_hidden=256 — was 250k at d_hidden=128)
+
+
+================================================================================
+3. ARTIFACTS PRODUCED BY PHASE 0
+================================================================================
+
+Run directory layout:
+  grokking_runs/
+    transformer_run/
+      checkpoints/
+        epoch_init.pt              (untrained model, t=0 reference)
+        epoch_0000000.pt
+        epoch_NNNNNNN.pt           (~200 log-spaced snapshots)
+        epoch_0024999.pt           (final, fully grokked)
+      metrics.pkl                  (train/test loss & acc per epoch)
+      config.pkl                   (the GrokConfig used for the run)
+    mlp_run/
+      checkpoints/
+        ...same structure...
+      metrics.pkl
+      config.pkl
+
+Each checkpoint .pt file is a dict with:
+  'epoch': int
+  'model_state': state_dict (use this for loading the model)
+  'optimizer_state': state_dict (only present in non-init checkpoints)
+
+The PRIMARY ASSETS for Phase 1+ are:
+  - The final transformer checkpoint (test_acc = 1.000)
+  - The final MLP checkpoint (test_acc = 1.000)
+  - Optionally the log-spaced intermediate checkpoints (for future Phase 4
+    developmental analysis — not your concern in Phase 1).
+
+Both models share the SAME train/test split (because seed is the same and the
+shuffling RNG is seeded with config.seed). This is intentional and preserves
+the option of running data-attribution (MAGIC-style) analysis in a later phase.
+
+
+================================================================================
+4. SEQUENCE CONVENTION & RESIDUAL-STREAM POSITIONS
+================================================================================
+
+CRITICAL: The token order is (BOS, a, b), with BOS = p.
+
+  Position 0: BOS token
+  Position 1: a token (first operand)
+  Position 2: b token (second operand) — this is where prediction happens
+
+For Phase 1 belief-geometry decoding, the four positions of interest are:
+
+  POS 1 — post-embed at the "a" position (index 1):
+    Decode ⟨v^(a)| from the residual stream.
+
+  POS 2 — post-embed at the "b" position (index 2):
+    Decode ⟨v^(b)|.
+
+  POS 3 — post-attention at the "b" position (index 2):
+    Decode ⟨v^(a)| + ⟨v^(b)|.
+    (Attention has had a chance to mix in info from position 1.)
+
+  POS 4 — post-MLP at the "b" position (index 2):
+    Decode ⟨v^(a+b mod p)|.
+    (The MLP has implemented the modular-add operation.)
+
+The training code reads logits from `model(x)[:, -1, :-1]`:
+  - `[:, -1, :]` takes the last position (which is index 2 with this convention)
+  - `[:, :, :-1]` drops the BOS column from the vocabulary axis (since the
+    target c is in {0, ..., p-1}, not the BOS token)
+
+For the MLP, only two positions exist:
+  POS M1 — pre-ReLU: W_a @ a + W_b @ b ∈ R^d_hidden
+    Analogue of transformer POS 3. Decode ⟨v^(a)| + ⟨v^(b)|.
+  POS M2 — post-ReLU: ReLU(W_a @ a + W_b @ b)
+    Analogue of transformer POS 4. Decode ⟨v^(a+b mod p)|.
+
+
+================================================================================
+5. THINGS TRIED AND REJECTED (DON'T RE-EXPLORE)
+================================================================================
+
+These are dead ends or already-resolved questions. Don't burn time on them.
+
+  - Lowering lr to 1e-4: MLP fails to grok at any reasonable epoch budget.
+    Stick with lr=1e-3 (matches Chughtai exactly).
+
+  - Lowering wd: tested wd=0.5 for both models. Slightly cleaner-looking
+    curves but no scientific advantage and breaks the matched-recipe story.
+    wd=1.0 is what BOTH papers use (Poncini's transformer, Chughtai's MLP),
+    so wd=1.0 is the principled choice.
+
+  - frac_train=0.40: also works, with shorter memorization window. 0.30 was
+    chosen for the longer memorization phase (more useful for future
+    developmental analysis at Phase 4+).
+
+  - Default nn.Linear init: ~sqrt(3) too small vs Nanda's reference. The
+    notebook overrides this with explicit nn.init.normal_ calls.
+    DO NOT revert to defaults — grokking dynamics noticeably differ.
+
+  - sqrt(d_model) attention scaling for single-head: produced soft
+    test-accuracy ramps instead of clean grokking transitions. Replaced
+    with sqrt(d_model // 4) = sqrt(32). See section 2 for full reasoning.
+
+  - d_hidden=128 for the MLP: stuck at test_acc=0.996. Bumped to 256.
+
+  - 4-head attention: would also produce sharp transitions but adds
+    structural complexity. Single-head + sqrt(32) scaling achieves the same
+    visual result while staying close to Poncini's architectural choice.
+
+  - Differing train fractions between models: rejected in favor of matched
+    splits, to preserve the data-attribution / MAGIC story for a later phase.
+
+
+================================================================================
+6. PHASE 1 PLAN (TRANSFORMER BELIEF GEOMETRY) — YOUR NEXT TASK
+================================================================================
+
+Step 1.1: Fit (α_k, ω_k) from the trained transformer's logits.
+  Solve: minimize over (α_k, ω_k) the residual of
+    z(a, b, c) = Σ_{k=1}^n α_k² cos(2π ω_k (a + b − c) / p)
+    fit to model logits over all triples (a, b, c).
+  Frequency selection: enumerate ω_k ∈ {1, ..., ⌊p/2⌋} = {1, ..., 56},
+  solve linear regression for {α_k²} coefficients, sort by contribution,
+  keep top n that bring R² above 0.99.
+  Reference (Poncini, p=113, his run): ~5 frequencies, α_k ≈ (3.56, 2.86,
+  2.42, 2.29), ω_k ∈ (38, 30, 41, 18, 36). YOUR numbers will differ — these
+  are seed-dependent. You target: R² ≥ 0.99 with the fit.
+
+Step 1.2: Construct the predictive vectors.
+  EHMM (sRRMod_p): for each (i, ω_k) where i ∈ {0, ..., p-1},
+    ⟨v_{ω_k}^(i)| = (cos(2π ω_k i / p), sin(2π ω_k i / p))
+  Full predictive vector: ⟨v^(i)| = ⊕_k α_k ⟨v_{ω_k}^(i)|  (direct sum, weighted)
+  HMM control (RRMod_p): ⟨e_p^(i)| = i-th elementary p-dim basis row vector.
+
+Step 1.3: Decode at the four residual-stream positions (see section 4).
+  For all (a, b) ∈ X_p × X_p, extract activations at POS 1, 2, 3, 4.
+  Per position:
+    Supervised: ridge regression from activations → predictive vectors. R².
+    Semi-supervised: PCA top ~10 PCs (report explained variance), then ridge
+      regression from PCs → predictive vectors with α_k=1. R² + scatter plot
+      colored by relevant index (a, b, or a+b mod p).
+  Control at POS 4: also fit to ⟨e_p^(a+b)|. Should get R² ≈ 0.09
+  (validates Poncini's main result that the model represents EHMM, not HMM).
+
+Step 1.4: Per-frequency decoding.
+  Repeat regression at each position, but fit to individual ⟨v_{ω_k}^(·)|
+  separately. Produce per-position × per-frequency R² grid.
+  Visualize the polygon for each frequency in PCA scatter.
+
+
+================================================================================
+7. PHASE 2 PLAN (MLP BELIEF GEOMETRY)
+================================================================================
+
+Step 2.1: Re-fit (α_k, ω_k) on the MLP's logits.
+  Same procedure as Step 1.1, but on MLP logits. The MLP's chosen frequencies
+  are likely DIFFERENT from the transformer's — that is expected (Chughtai's
+  weak universality result). Don't reuse the transformer's fitted params.
+
+Step 2.2: Decode at MLP positions M1 (pre-ReLU) and M2 (post-ReLU).
+  Same supervised + semi-supervised analyses + per-frequency decomposition.
+
+Optional: also decode ⟨v^(a)| from W_a @ a alone (zero-out b input) and
+⟨v^(b)| from W_b @ b alone. This is the analogue of POS 1 and POS 2 in the
+transformer. Worth doing for completeness in Phase 3 comparison.
+
+
+================================================================================
+8. PHASE 3 PLAN (CROSS-ARCHITECTURE COMPARISON)
+================================================================================
+
+Compare the two converged models on these axes:
+
+  (a) Same algorithm family? Both should give R² ≈ 0.99 for EHMM predictive
+      vectors and R² ≈ 0.09 for HMM (simplex) predictive vectors. Confirm.
+
+  (b) Same or different (α_k, ω_k)? Compare fitted frequencies and amplitudes.
+      Different frequencies are EXPECTED and OK (weak universality);
+      what matters is whether both models pick some Fourier set.
+
+  (c) ReLU as the modular-addition operator: compare R² at MLP POS M1
+      (pre-ReLU, decoding sum of predictive vectors) vs POS M2 (post-ReLU,
+      decoding predictive vector of the sum). Both should be high if ReLU
+      cleanly implements modular addition. If POS M2 R² is meaningfully
+      lower while logits are still correct, that's an interesting deviation
+      worth investigating.
+
+  (d) Polygon width: Poncini observes "non-trivial width" to the polygons
+      at the post-MLP position, attributed to how the MLP computes the
+      modular sum. Check whether the same width appears in the MLP
+      architecture, and at which positions. May be a publishable observation.
+
+
+================================================================================
+9. CODEBASE LOCATIONS
+================================================================================
+
+  /home/ben/mathematics_thesis_project/grokking_project/
+    grokking_dual_models.ipynb     — main notebook (Phase 0)
+    grokking_runs/                 — checkpoints + metrics for both models
+    references/                    — PDFs of relevant papers
+    helpers.py, transformers.py    — Nanda's reference code (untouched, for
+                                     consulting only — DO NOT import from)
+    *.png                          — many curve files from iterating on hparams
+    phase0_handoff.txt             — this file
+
+  Key reference papers in references/:
+    PIBBSS_report.pdf
+      Poncini's PIBBSS report — primary thing being replicated/extended.
+      Section 4 has the transformer setup; Appendix D has full hparams.
+    a_toy_mode_of_universality.pdf
+      Chughtai, Chan, Nanda 2023. The ACTUAL Chughtai paper.
+      (Note: filename has typo "mode" instead of "model".)
+      "Architecture Details" appendix has MLP hparams.
+      Mainline experiment is S5; cyclic groups appear in universality sweep.
+    constrained_belief_updates_explain_geometric_structures...pdf
+      Riechers/Shai et al. on belief geometry in residual streams.
+    transformers_represent_belief_state_geometry...pdf
+      The original Shai paper.
+    towards_a_unified_and_verified_understanding_of_group_operation_networks.pdf
+      Stander et al. (NOT Chughtai — the previous agent confused these).
+      Useful for cross-checking but Chughtai's paper above is the right
+      reference for the MLP recipe.
+
+
+================================================================================
+10. INFRASTRUCTURE NOTES
+================================================================================
+
+  - The training loop uses tqdm.auto progress bars.
+  - Cross-entropy is computed in float64 (cross_entropy_high_precision) to
+    avoid float32 underflow that creates spurious near-zero loss spikes
+    after grokking. Keep this when doing analysis on logits — the model's
+    logits are float32 but you may want to log_softmax in float64 for
+    visualization.
+  - Test loss/acc is recorded every epoch (needed for the grokking
+    visualization). Train loss/acc is recorded from the same forward pass
+    used for backprop (no extra forward).
+  - Checkpoint cadence is log-spaced via log_spaced_epochs(num_epochs, 200).
+    First ~10 checkpoints densely cover early epochs, last few cover the
+    converged tail.
+  - GPU expected. p=113 with full-batch is fast on any modern GPU (transformer
+    ~few minutes, MLP ~10-15 min on a laptop GPU).
+
+
+================================================================================
+11. WHAT YOU SHOULD DO FIRST
+================================================================================
+
+Recommended startup sequence for the new agent:
+
+  1. Skim sections 1, 2, 4, 6 of THIS file to understand the goal, the
+     hparams, the position conventions, and your immediate task (Phase 1).
+  2. Open the notebook at grokking_dual_models.ipynb to see the model code
+     (GrokTransformer, ChughtaiMLP) and dataset convention (make_dataset).
+  3. Read the Poncini PIBBSS report Section 4 + Appendix D (the technical
+     setup section) and Section 5 (the belief-geometry results).
+     Specifically the part about the EHMM presentation and the (α_k, ω_k)
+     fitting procedure.
+  4. Load the final transformer checkpoint:
+       state = torch.load('grokking_runs/transformer_run/checkpoints/epoch_0024999.pt')
+       model = GrokTransformer(GrokConfig()).to(DEVICE)
+       model.load_state_dict(state['model_state'])
+       model.eval()
+     (Adjust filename for whichever epoch number is the final one — should be
+      transformer_epochs - 1 = 24999 by default, but verify.)
+  5. Sanity check: forward all p² (a,b) pairs, confirm test_acc=1.000 on
+     held-out pairs. If it's not, something's wrong with checkpoint loading.
+  6. Begin Step 1.1: implement the (α_k, ω_k) fit.
+
+Suggested module structure for new code (keeping notebook for orchestration):
+
+  decoding/
+    predictive_vectors.py    — construct ⟨v^(i)|, ⟨e_p^(i)|, ⟨v_{ω_k}^(i)|
+    fit_logits.py            — fit (α_k, ω_k) to model logits
+    decode.py                — supervised + semi-supervised decoding pipeline
+    per_frequency.py         — per-frequency decomposition
+  analysis/
+    transformer_belief.py    — Phase 1
+    mlp_belief.py            — Phase 2
+    compare.py               — Phase 3
+
+The notebook can import from these modules and orchestrate runs.
+
+Good luck.

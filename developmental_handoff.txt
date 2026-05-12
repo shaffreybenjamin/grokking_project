@@ -1,0 +1,347 @@
+================================================================================
+DEVELOPMENTAL ANALYSIS HANDOFF — Grokking Belief Geometry (CompMech) Project
+================================================================================
+
+PURPOSE OF THIS DOCUMENT
+------------------------
+This is the entry point for working on the *developmental* (per-checkpoint)
+belief-geometry analysis. The static (final-checkpoint) analysis is being
+finished in a parallel conversation; this document carries forward only what
+the developmental phase needs.
+
+If you also need the broader Phase 0 / Phase 1 setup, read phase0_handoff.txt
+first — it covers training hyperparameters, model architectures, and the
+sequence convention. Don't re-derive those.
+
+
+================================================================================
+1. ONE-PARAGRAPH PROJECT CONTEXT
+================================================================================
+
+Modular addition mod p=113 with two architectures: a single-layer single-head
+transformer (Nanda/Poncini setup, d_model=128) and a one-hidden-layer ReLU MLP
+with separate left/right embeddings (Chughtai setup, d_hidden=512). Both are
+trained to grok (test_acc=1.0) with matched hyperparameters. The static
+analysis (phase1_belief_geometry.ipynb) replicates Poncini (PIBBSS report) on
+the converged models: fit (α_k, ω_k) Fourier frequencies from logits, decode
+EHMM predictive vectors at residual-stream positions, control against an
+HMM-simplex baseline. The *developmental* phase tracks the formation of these
+representations across all saved checkpoints (~160 log-spaced epochs) — a
+quantitative replacement for staring at per-frequency plots at every step.
+
+
+================================================================================
+2. CODE LAYOUT
+================================================================================
+
+  training/                         (Phase 0 infrastructure — don't modify)
+    config.py                       GrokConfig, set_global_seeds
+    models.py                       GrokTransformer, ChughtaiMLP
+    data.py                         make_dataset, evaluate, ...
+    loop.py                         train_loop, log_spaced_epochs
+    checkpoints.py                  load_final_checkpoint
+
+  decoding/                         (Phase 1 building blocks — already mature)
+    predictive_vectors.py           simplex / circle / EHMM direct-sum vectors
+    fit_logits.py                   fit_frequencies (Poncini cos basis)
+    decode.py                       supervised_decode, semisupervised_decode,
+                                    collect_*_activations
+    per_frequency.py                single_circle_target, sum_of_circles_target
+
+  analysis/
+    transformer_belief.py           Phase 1 (static) for transformer
+    mlp_belief.py                   Phase 1 (static) for MLP
+    compare.py                      Phase 1 cross-architecture comparison
+    trajectory.py                   FIRST developmental tool — fits (ω,α) ONCE
+                                    at the final checkpoint, decodes against
+                                    that fixed EHMM at every checkpoint
+    developmental.py                NEW developmental tool — re-fits (ω,α) at
+                                    EACH checkpoint and records structure-
+                                    formation metrics. PARTIALLY IMPLEMENTED;
+                                    work on this in the new conversation.
+
+  phase1_belief_geometry.ipynb      Notebook orchestrating both phases
+  grokking_runs/                    Trained models (transformer + MLP, fully
+                                    grokked, ~160 log-spaced checkpoints each)
+
+
+================================================================================
+3. WHAT TRAJECTORY.PY ALREADY DOES (DON'T DUPLICATE)
+================================================================================
+
+`trajectory.py` is the lighter-weight developmental tool. For each checkpoint:
+  - Decode the EHMM polygon at a chosen position (POS4 or M2 by default; POS3
+    or M1 also supported), using (ω_k, α_k) fitted ONCE at the final checkpoint
+    and held fixed across the sweep.
+  - Decode the HMM-simplex one-hot control at the same position.
+  - Record both R² values per checkpoint.
+
+Position-appropriate EHMM target (already correct in trajectory.py):
+  POS3, M1 → ⟨v(a)| + ⟨v(b)|     (additive, pre-modular-sum)
+  POS4, M2 → ⟨v(a+b mod p)|      (single-circle, post-modular-sum)
+  POS1, POS2 → ⟨v(a)| or ⟨v(b)|  (single-index)
+
+A subtle config detail: ridge_alpha=1e-3 for EHMM fit, but simplex_alpha=1.0
+for the HMM-simplex fit. The simplex target has p=113 one-hot columns and
+gets ill-conditioned at early checkpoints — alpha=1.0 stabilises that fit
+without changing the converged values (they agree to ~0.005 with alpha=1e-3).
+DO NOT change this without a reason.
+
+Outputs of `sweep_transformer` / `sweep_mlp`:
+  epochs, r2_ehmm, r2_simplex, omegas, alphas, position, p, run_name, ...
+
+Plotting helpers: `plot_trajectory`, `plot_trajectory_comparison`. Both
+support `clip_negative=True` to handle rare ill-conditioned R² < 0 spikes.
+
+
+================================================================================
+4. WHAT DEVELOPMENTAL.PY IS MEANT TO DO (THE NEW WORK)
+================================================================================
+
+Whereas trajectory.py answers "how much of the *eventually-learned* algorithm
+is present at each checkpoint", developmental.py answers "how complex / how
+formed is the algorithm at each checkpoint". For each checkpoint, freshly
+fit (ω_k, α_k) and record several scalar diagnostics:
+
+    n_eff            number of frequencies needed for the logit fit's
+                     cumulative R² to reach target_r2
+    n_dominant       number of frequencies with α² > 10% of the largest α²
+                     (threshold-free w.r.t. R² convergence)
+    logit_r2         cumulative R² achieved at this checkpoint
+    alpha_entropy    Shannon entropy of the normalised α² distribution
+                     (low = concentrated; high = spread)
+    per_freq_r2      supervised R² at the chosen position for each of the
+                     top-K fitted frequencies, decoded individually
+    r2_ehmm          supervised R² of the full EHMM at the chosen position
+    r2_simplex       supervised R² of the simplex one-hot control
+
+Plus plotters:
+    plot_developmental_signature  4-panel stack (logit-fit R², N_eff,
+                                  α² entropy, top-K per-freq R²)
+    plot_structure_formation      single-panel R²(EHMM)/R²(simplex)/N_eff
+                                  with a vertical line at the first epoch
+                                  where structure has formed
+    detect_structure_formation    decision function returning the first
+                                  formation epoch + a boolean mask
+
+Current state of developmental.py: scaffolded with sweep_developmental_*,
+_step_metrics, detect_structure_formation, plot_developmental_signature,
+plot_structure_formation. *n_dominant is NOT yet implemented*; the docstring
+mentions it but the code doesn't compute it. THIS IS THE FIRST TODO.
+
+
+================================================================================
+5. KEY FINDINGS FROM THE STATIC PHASE THAT THE DEVELOPMENTAL PHASE INHERITS
+================================================================================
+
+5.1 The transformer uses ~4 dominant Fourier modes
+    Final-checkpoint fit gives ω = (49, 30, 25, 41) with large α²; lower-α
+    frequencies (15, 10, 23, 53, 38, 34) are SPURIOUS HARMONICS arising from
+    cos(ω_i)·cos(ω_j) products in the MLP. Diagnostic:
+        49 + 30 = 79, and 113 − 79 = 34   ✓
+        49 + 41 = 90, and 113 − 90 = 23   ✓
+    These spurious modes have supervised R² ≈ 0.5 at POS4 — they're recovered
+    only as cos-components, not as full (cos, sin) pairs, hence half-recovered.
+    THE ALGORITHM IS 4-FREQUENCY. Spurious harmonics are not "extra structure"
+    the model learned, they're arithmetic byproducts of the multiplication.
+
+5.2 The cos-only Poncini basis caps R² below 1.0
+    The Poncini ansatz z = Σ α² cos(2π ω (a+b−c)/p) only fits the part of z
+    that's SYMMETRIC under u → −u (since cos is even). A real trained model's
+    logits have a small asymmetric (sin-of-u) residual. For our transformer:
+        R² with 4 freqs   ≈ 0.97
+        R² with 20 freqs  ≈ 0.9878   (asymptote)
+    Adding more cosine frequencies doesn't help — the residual lives in sine
+    directions the basis can't reach. Implication: target_r2=0.99 is
+    UNREACHABLE for our model. If you set target_r2=0.99 and max_freqs=K,
+    n_eff will saturate at K at every checkpoint — useless as a signal.
+    Use target_r2=0.95 (which IS reachable, around 4 frequencies) for the
+    developmental sweep.
+
+5.3 The MLP spreads its representation across ~10+ frequencies
+    Final-checkpoint fit gives ω = (22, 33, 41, 16, 51, 7, 36, 27, 19, 48)
+    with similar α² across all 10. Per-frequency supervised R² at M1 is
+    1.000 for every fitted ω; at M2 it's uniformly ~0.85. This is Chughtai's
+    weak universality — the MLP doesn't concentrate like the transformer.
+    Implication: the n_dominant metric will read very different numbers for
+    the two architectures (transformer ~4, MLP ~10+). That's a real finding
+    to surface, not an artifact.
+
+5.4 Choice of decoding position matters
+    POS4 (transformer) and M2 (MLP) are both *immediately before unembed*,
+    where activations encode prediction-confidence info (the simplex one-hot
+    of c is decodable). For the MLP this inflates the simplex R² to ~0.69
+    at convergence and confounds the EHMM-vs-HMM separation. POS3 (transformer
+    pre-MLP) and M1 (MLP pre-ReLU) are cleaner because the modular sum hasn't
+    been computed yet — simplex R² stays near zero.
+
+    The trajectory.py default is post-MLP (POS4/M2). For developmental
+    analysis, decide deliberately:
+      - Post-MLP: matches Poncini's main result, sharp grokking shape for
+        transformer, but conflates "EHMM" and "prediction-collapse" for MLP.
+      - Pre-MLP: cleaner cross-architecture comparison, but you're tracking
+        the additive structure ⟨v(a)|+⟨v(b)| rather than the post-sum
+        polygon. Both stories matter.
+
+5.5 The MLP's d_hidden=512 dilutes the per-frequency PCA recovery
+    With d_hidden=512 and 10 frequencies of similar amplitude, the top 10 PCs
+    don't isolate any single frequency — they're linear combinations across
+    multiple ω. n_pcs=10 in semi-supervised decoding gives R²≈0.1 per
+    frequency at M1, even though SUPERVISED decoding at M1 hits R²=1.0 (the
+    information IS there, just not in the top 10 PCs). Bumping n_pcs to ~40
+    captures the full Fourier subspace.
+
+    For the developmental sweep this means: per-frequency supervised R² is
+    the right metric to track (full activations, no PCA), and is what
+    developmental.py uses. PCA-based per-frequency R² would be much noisier
+    at the MLP and shouldn't be used as a developmental signal.
+
+5.6 Static MLP is being retrained at d_hidden=256
+    There's an open option to retrain the MLP at d_hidden=256 (matches
+    Chughtai exactly and concentrates the representation). If that retrain
+    happens, the developmental sweep should be re-run on those checkpoints —
+    it'll likely show fewer dominant frequencies and cleaner per-frequency
+    R² trajectories.
+
+
+================================================================================
+6. DECISIONS ALREADY MADE (DON'T RE-DEBATE)
+================================================================================
+
+  - target_r2=0.95 (NOT 0.99) for the developmental sweep — model can't reach
+    0.99 with the cos basis (5.2).
+  - max_freqs=10 (NOT 20) for the developmental sweep — modest headroom over
+    the ~4 dominant transformer frequencies, matches the user's intuition,
+    avoids the asymmetric-residual asymptote issue.
+  - n_dominant is the headline metric (threshold-free); n_eff is a secondary
+    diagnostic (tied to a target_r2 choice).
+  - n_dominant uses 10% threshold (α² > 0.10 · max α²) by default. The
+    threshold is arbitrary but the *trajectory* of n_dominant across training
+    is the signal, not its absolute value.
+  - per_freq_r2 uses SUPERVISED decoding (full activations), not PCA→ridge
+    semi-supervised — the latter is unreliable at d_hidden=512 (5.5).
+  - The structure-formation detector triggers when ALL of:
+        r2_ehmm > 0.95 AND r2_simplex < 0.20 AND n_dominant ≤ small_int
+    Default `small_int = 10` is loose; tighten if false positives appear.
+
+
+================================================================================
+7. CONCRETE TODO LIST FOR THE NEW CONVERSATION
+================================================================================
+
+7.1 Implement n_dominant in developmental.py
+    Add a `_dominant_count(alpha_squared, threshold=0.1)` helper, append
+    `n_dominant` to the sweep result dict, expose `n_dominant_threshold` as
+    a kwarg on sweep_developmental_*. Update plot_developmental_signature
+    to include n_dominant alongside n_eff (probably as a secondary line on
+    the same N_eff panel, or a separate fifth panel).
+
+7.2 Update detect_structure_formation to use n_dominant
+    Replace the n_eff trigger with an n_dominant trigger (rename the
+    threshold kwarg accordingly). Keep n_eff as an alternate detector mode
+    for documentation but not the default.
+
+7.3 Defaults: change target_r2 default to 0.95 and max_freqs default to 10
+    in sweep_developmental_transformer and sweep_developmental_mlp.
+
+7.4 Run the developmental sweep on both architectures and inspect
+    Expected qualitative results:
+      Transformer at POS4:
+        - n_dominant drops from ~10 to ~4 during epochs ~2000–5000
+        - logit_r2 climbs from ~0.05 to ~0.99 (asymptote ~0.99)
+        - alpha_entropy drops sharply at the grokking transition
+        - per_freq_r2 (top 4) rises from noise to ~1.0 in lockstep
+        - r2_ehmm sharp climb, r2_simplex peaks at ~0.15 then settles
+      MLP at M2:
+        - n_dominant stays high (~10+) throughout — Chughtai universality
+        - logit_r2 climbs gradually
+        - per_freq_r2 climbs gradually
+        - r2_ehmm and r2_simplex both rise (the position-position artifact
+          discussed in 5.4)
+      MLP at M1 (pre-ReLU):
+        - cleaner picture — should look more transformer-like
+
+7.5 Add notebook cells for the developmental section
+    Section header "Developmental signature" after the existing trajectory
+    section. Cells:
+        sweep_developmental_transformer(...)
+        sweep_developmental_mlp(...)
+        plot_developmental_signature(t_dev) and save_fig
+        plot_developmental_signature(m_dev) and save_fig
+        detect_structure_formation(t_dev) → print summary
+        detect_structure_formation(m_dev) → print summary
+        plot_structure_formation(t_dev, ...) and save_fig
+        plot_structure_formation(m_dev, ...) and save_fig
+    Save figures to figures/belief_geometry_figs/ (helper save_fig already
+    set up in the imports cell of the notebook).
+
+7.6 (Optional / stretch) Cross-architecture developmental comparison
+    A two-panel plot showing transformer n_dominant(epoch) and MLP
+    n_dominant(epoch) on the same axes. The headline finding will likely be
+    "both architectures grok but the MLP never concentrates onto a small
+    set of frequencies" — that's the publishable Phase 3 contribution.
+
+7.7 (Optional) Activation-rank metric (proposed but not yet implemented)
+    SVD of the (p², d) activation matrix at the chosen position; report the
+    number of singular values above some threshold (e.g. ε · σ_max with
+    ε=0.05). Compare against 2 · n_dominant: if they agree, the model uses
+    its Fourier basis efficiently; if rank > 2 · n_dominant, there's
+    "extra structure" the Fourier ansatz misses. This is independent
+    confirmation of the cosine-basis-residual issue from 5.2.
+
+
+================================================================================
+8. THINGS NOT YET DECIDED
+================================================================================
+
+  - Whether to fit BOTH cosines and sines in fit_logits.py (would close the
+    R²-asymptote gap from 5.2 and bring transformer R² to ~1.0). Open
+    question because Poncini's exact formula uses cos only; deviating loses
+    direct comparability to his report. Defer until needed.
+  - Which position (POS4/M2 vs POS3/M1) should be the *primary* developmental
+    diagnostic. Both have value (5.4). For now developmental.py defaults to
+    post-modular-sum to match Poncini Fig 2; consider running a parallel
+    sweep at the pre-MLP position and producing a comparison plot.
+  - Whether to retrain the MLP at d_hidden=256 (5.6). Cleaner analysis but
+    requires retraining time. Decide based on whether the d_hidden=512
+    developmental signature is interpretable enough for the thesis.
+
+
+================================================================================
+9. INFRASTRUCTURE NOTES
+================================================================================
+
+  - Each developmental sweep takes ~3–5 minutes per architecture (~160
+    checkpoints, one forward + one fit + ~6 ridge regressions per checkpoint).
+    Run with `verbose=True` to see a tqdm bar.
+  - GPU is preferred but not required — sweeps complete in reasonable time
+    on CPU (~5 min instead of ~3).
+  - Memory: a single (p², d_model) activation matrix is ~12k × 128 × 8 bytes
+    ≈ 12 MB, trivially fits.
+  - The supervised-decode ridge fit at the simplex (113 columns) issues
+    LinAlgWarnings at very-untrained checkpoints. Set warnings.filterwarnings
+    or pass simplex_alpha=1.0 (already the default). Both EHMM and simplex
+    R² values are clipped to ≥ 0 in plot_trajectory / plot_structure_formation
+    via clip_negative=True.
+  - Recommend running sweeps in a separate notebook cell (not interactively)
+    so you don't accidentally rerun the slow part while iterating on plotting.
+
+
+================================================================================
+10. FIRST RECOMMENDED ACTION FOR THE NEW CONVERSATION
+================================================================================
+
+  1. Read this file end-to-end (you already have).
+  2. Open analysis/developmental.py and verify what's there: skim
+     sweep_developmental_transformer, _step_metrics, detect_structure_formation,
+     plot_developmental_signature, plot_structure_formation. Note that
+     n_dominant is NOT yet computed anywhere.
+  3. Implement section 7.1 (n_dominant) — small, contained change, ~10 LOC.
+  4. Apply the default changes from 7.3 (target_r2=0.95, max_freqs=10).
+  5. Run a single-checkpoint smoke test on the final transformer checkpoint
+     to verify the metrics compute without error and look sensible:
+        from analysis.developmental import _step_metrics, _entropy
+        # ... load model, call _step_metrics, print all metrics.
+  6. Then 7.2, 7.4, 7.5 in order.
+
+Good luck.
