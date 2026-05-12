@@ -10,14 +10,14 @@ venv/
 envs/
 
 # Training outputs
-grokking_runs/
-checkpoints/
-runs/
-wandb/
-*.pt
-*.pth
-*.npz
-*.npy
+# grokking_runs/
+# checkpoints/
+# runs/
+# wandb/
+# *.pt
+# *.pth
+# *.npz
+# *.npy
 
 # External repos cloned for reference
 entropy-sgd/
