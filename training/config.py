@@ -28,10 +28,10 @@ class GrokConfig:
     betas: tuple = (0.9, 0.98)
     d_model: int = 128
     d_mlp: int = 512
-    mlp_d_hidden: int = 256
+    mlp_d_hidden: int = 512
     n_ctx: int = 3
     transformer_epochs: int = 25_000
-    mlp_epochs: int = 100_000
+    mlp_epochs: int = 25_000
     num_checkpoints: int = 200
     seed: int = SEED
     fn_name: str = 'add'
