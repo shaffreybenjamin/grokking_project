@@ -1,6 +1,7 @@
 """Phase 2: MLP belief geometry analysis."""
 import numpy as np
 import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
 
 from decoding.fit_logits import mlp_logit_tensor, fit_frequencies
 from decoding.predictive_vectors import (
@@ -22,6 +23,7 @@ from decoding.per_frequency import (
 
 POSITIONS = ['M1', 'M2']
 COLOR_INDEX = {'M1': 'c', 'M2': 'c'}
+CLASS_INDEX = {'M1': 'a', 'M2': 'c'}
 
 
 def run_mlp_phase2(model, p: int, target_r2: float = 0.99,
@@ -106,40 +108,75 @@ def plot_position_pca(result: dict, position: str, color_by: str = None, ax=None
 
 
 def plot_per_frequency_pairs(result: dict, position: str, color_by: str = None,
+                             kind: str = 'supervised', class_mean: str = None,
                              n_pcs: int = 10, ridge_alpha: float = 1e-3,
-                             cmap: str = 'viridis', figsize=None):
+                             cmap: str = 'viridis', figsize=None,
+                             scatter_kwargs: dict = None):
     """Replicate Poncini Fig 3/4/5 for the MLP. M1 (pre-ReLU) decodes the additive
-    target ⟨v_ω^(a)| + ⟨v_ω^(b)|; M2 (post-ReLU) decodes ⟨v_ω^(a+b mod p)|."""
+    target ⟨v_ω^(a)| + ⟨v_ω^(b)|; M2 (post-ReLU) decodes ⟨v_ω^(a+b mod p)|.
+
+    kind='supervised' (default) fits the 2-D target using full-dim ridge, which is
+    the right choice for spread-frequency MLPs where no individual frequency plane
+    dominates the top PCs. kind='semisupervised' restricts the regression to the
+    top-n_pcs principal components.
+
+    class_mean: optional name of an index in acts ('a', 'b', 'c'). When set, the
+    activations are averaged within each class before regression — collapsing the
+    p² noisy samples to p class-mean points and removing per-(a,b) noise that
+    would otherwise show up as ring-thickness in the predictions. Recommended
+    for M2 (class_mean='c'), where post-ReLU frequency-mixing inflates the
+    per-sample residual and the rings look like fuzzy discs without it. For M1,
+    class_mean='a' (or 'b') collapses the rose pattern to a single-frequency
+    ring in a (or b)."""
     p = result['p']
     omegas = result['fit']['omegas']
     acts = result['activations']
+    scatter_kwargs = scatter_kwargs or {}
 
-    color_idx_name = color_by or COLOR_INDEX[position]
-    color_idx = acts[color_idx_name]
     activations = acts[position]
 
-    if position == 'M1':
-        a_arr, b_arr = acts['a'], acts['b']
-        target_fn = lambda w: sum_of_circles_target(a_arr, b_arr, w, p)
-    elif position == 'M2':
-        c_arr = acts['c']
-        target_fn = lambda w: single_circle_target(c_arr, w, p)
+    if class_mean is not None:
+        class_idx_arr = acts[class_mean]
+        activations = class_mean_activations(activations, class_idx_arr, p)
+        unique_idx = np.arange(p)
+        color_idx = unique_idx
+        color_idx_name = class_mean
+        target_fn = lambda w: single_circle_target(unique_idx, w, p)
+        default_scatter = dict(s=40, alpha=0.9)
     else:
-        raise ValueError(f'Unknown MLP position: {position}')
+        color_idx_name = color_by or COLOR_INDEX[position]
+        color_idx = acts[color_idx_name]
+        if position == 'M1':
+            a_arr, b_arr = acts['a'], acts['b']
+            target_fn = lambda w: sum_of_circles_target(a_arr, b_arr, w, p)
+        elif position == 'M2':
+            c_arr = acts['c']
+            target_fn = lambda w: single_circle_target(c_arr, w, p)
+        else:
+            raise ValueError(f'Unknown MLP position: {position}')
+        default_scatter = dict(s=8, alpha=0.7)
+    default_scatter.update(scatter_kwargs)
 
+    fit_label = 'Supervised-Fitted' if kind == 'supervised' else 'PCA-Fitted'
+    suffix = f' (class-mean by {class_mean})' if class_mean else ''
     n = len(omegas)
     fig, axes = plt.subplots(n, 2, figsize=figsize or (7, 3 * n), squeeze=False)
     last_sc = None
     for i, w in enumerate(omegas):
         target = target_fn(w)
-        res = semisupervised_decode(activations, target, n_pcs=n_pcs, alpha=ridge_alpha)
+        if kind == 'supervised':
+            res = supervised_decode(activations, target, alpha=ridge_alpha)
+        elif kind == 'semisupervised':
+            res = semisupervised_decode(activations, target, n_pcs=n_pcs, alpha=ridge_alpha)
+        else:
+            raise ValueError(f"Unknown kind: {kind!r}")
         pred = res['predictions']
         for col, (data, label) in enumerate(
             [(target, f'Theoretical: ω={w}'),
-             (pred, f'PCA-Fitted: ω={w}, R²={res["r2"]:.3f}')]
+             (pred, f'{fit_label}: ω={w}, R²={res["r2"]:.3f}')]
         ):
             sc = axes[i, col].scatter(data[:, 0], data[:, 1],
-                                      c=color_idx, cmap=cmap, s=8, alpha=0.7)
+                                      c=color_idx, cmap=cmap, **default_scatter)
             axes[i, col].set_aspect('equal')
             axes[i, col].set_title(label)
             if i == n - 1:
@@ -148,7 +185,7 @@ def plot_per_frequency_pairs(result: dict, position: str, color_by: str = None,
                 axes[i, col].set_ylabel('sin component')
             last_sc = sc
     fig.colorbar(last_sc, ax=axes, label=f'{color_idx_name} mod {p}', shrink=0.6)
-    fig.suptitle(f'{position} — per-frequency semi-supervised analysis')
+    fig.suptitle(f'{position} — per-frequency {kind} analysis{suffix}')
     return fig
 
 
@@ -156,6 +193,56 @@ def plot_phase2_summary(result: dict, figsize=(12, 5.5)):
     fig, axes = plt.subplots(1, 2, figsize=figsize)
     for ax, pos in zip(axes, POSITIONS):
         plot_position_pca(result, pos, ax=ax)
+    plt.tight_layout()
+    return fig
+
+
+def class_mean_activations(activations: np.ndarray, class_idx: np.ndarray,
+                            n_classes: int) -> np.ndarray:
+    """Average activations within each class. Returns (n_classes, d)."""
+    out = np.zeros((n_classes, activations.shape[1]), dtype=activations.dtype)
+    for k in range(n_classes):
+        mask = class_idx == k
+        if mask.any():
+            out[k] = activations[mask].mean(axis=0)
+    return out
+
+
+def plot_position_classmean(result: dict, position: str, class_by: str = None,
+                             ax=None, cmap: str = 'hsv'):
+    """Top-2-PC scatter of class-mean activations.
+
+    For M2 we average over all (a,b) with a+b≡c (class=c), which kills the
+    per-sample noise that drowns the cross-c Fourier structure in the raw
+    activation scatter. For M1 we average over b at fixed a (class=a) — the
+    activation is linear in (a, b) so this isolates the per-a embedding.
+    """
+    p = result['p']
+    class_idx_name = class_by or CLASS_INDEX[position]
+    activations = result['activations'][position]
+    class_idx = result['activations'][class_idx_name]
+    means = class_mean_activations(activations, class_idx, p)
+    means_centered = means - means.mean(axis=0, keepdims=True)
+    pca = PCA(n_components=2)
+    Z = pca.fit_transform(means_centered)
+    if ax is None:
+        _, ax = plt.subplots(figsize=(6, 6))
+    sc = ax.scatter(Z[:, 0], Z[:, 1], c=np.arange(p), cmap=cmap, s=40)
+    ev = pca.explained_variance_ratio_[:2].sum()
+    ax.set_title(f"{position}: class-mean by {class_idx_name}, "
+                 f"EV(top 2 PCs)={ev:.2%}")
+    plt.colorbar(sc, ax=ax, label=class_idx_name)
+    ax.set_aspect('equal')
+    return ax
+
+
+def plot_phase2_summary_classmean(result: dict, figsize=(12, 5.5)):
+    """Class-averaged version of plot_phase2_summary. Far cleaner than the raw
+    p²-point scatter for spread-frequency MLPs: per-sample noise integrates out
+    and the dominant Fourier mode emerges as a ring in the top-2-PC plane."""
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+    for ax, pos in zip(axes, POSITIONS):
+        plot_position_classmean(result, pos, ax=ax)
     plt.tight_layout()
     return fig
 

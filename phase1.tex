@@ -1,0 +1,499 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{xcolor}
+\usepackage{natbib}
+\usepackage{microtype}
+
+\geometry{margin=1in}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!70!black,
+    citecolor=blue!70!black,
+    urlcolor=blue!70!black
+}
+
+\newtheorem{definition}{Definition}
+\newtheorem{hypothesis}{Hypothesis}
+\newtheorem{remark}{Remark}
+
+\title{\textbf{Phase 1: Static Belief Geometry of a Grokked Transformer and MLP} \\
+\large Replicating Poncini, extending to the MLP, and reading out\\
+representational economy from belief-geometry signatures}
+
+\author{Benjamin Shaffrey \\
+MSc Artificial Intelligence \& MSc Mathematics}
+
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We report the static-phase belief-geometry analysis of two minimal models grokked on modular addition modulo $p = 113$: a single-layer single-head transformer ($d_{\mathrm{model}} = 128$, ${\sim}226$k parameters) and a Chughtai-style one-hidden-layer MLP ($d_{\mathrm{hidden}} = 512$). The transformer analysis cleanly replicates \citet{poncini2025compmech}: the model linearly represents the sRRMod$_p$ EHMM predictive vectors at every residual-stream position ($R^2 \approx 1$) but not the RRMod$_p$ HMM simplex ($R^2 = 0.15$). The MLP, naively read, would suggest a different algorithm: at the post-ReLU readout, both EHMM ($R^2 = 0.86$) and simplex ($R^2 = 0.70$) are linearly decodable. Two methodological refinements (full-dimensional supervised regression in place of PCA-restricted regression, and class-mean activation pre-averaging) reveal that this is not algorithmic divergence but a Dirichlet-kernel-driven consequence of the MLP using \emph{more} Fourier frequencies of similar amplitude (${\sim}10$) than the transformer (${\sim}4$). Both architectures implement the same Fourier multiplication on $\mathbb{Z}/p\mathbb{Z}$; they differ in \emph{representational economy}: the transformer is compressive, the MLP is redundant. The full-sample versus class-meaned $R^2$ gap is proposed as a new architecture-comparing diagnostic of post-nonlinearity computational scaffolding.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%----------------------------------------------------------------------
+\section{Position of this report within the research programme}
+%----------------------------------------------------------------------
+
+The original proposal \citep{phase0_v2} laid out a multi-phase programme answering \emph{why does grokking happen?} via four complementary frameworks: belief geometry, the local learning coefficient (LLC), data attribution via unrolling, and bifurcation analysis. Of the eight research questions, this report addresses the static-phase part of \textbf{RQ1}:
+
+\begin{quote}
+\textbf{RQ1.} \emph{Can belief geometry identify learned algorithms model-agnostically? Do the transformer and the two-layer MLP exhibit the same belief geometry at convergence?}
+\end{quote}
+
+Phase~1 is a \emph{static} analysis: belief geometry computed once, at the final checkpoint of each model. Developmental tracking, LLC, unrolling, and bifurcation analysis are out of scope. We include a single representational \emph{trajectory} plot per architecture, because $R^2$ trajectories cost nothing extra once checkpoints have been saved and provide the cleanest visual evidence for the static-phase conclusions. The methodological refinements introduced in \cref{sec:methodology} are not architecture-specific tweaks; they apply uniformly and should carry over to non-abelian extensions ($S_5$, $S_6$) and to architectures where the algorithm cannot be read from the weights.
+
+%----------------------------------------------------------------------
+\section{The belief-geometry framework}\label{sec:framework}
+%----------------------------------------------------------------------
+
+Four spaces are involved: input space $\mathcal{X}$ (token sequences $(a, b, c)$ with $c \equiv a + b \bmod p$); parameter space $\Theta$; activation space $\mathcal{A}_{\mathrm{pos}}$; and predictive-vector space $\mathcal{V}$, determined by the DGP alone.
+
+\paragraph{Predictive vectors.} For a conditional distribution $P(\mathrm{future} \mid \mathrm{history})$, the \emph{predictive vector} $\langle v^{(x)} |$ is a coordinate representation of $P(\cdot \mid x)$. Two predictively-equivalent presentations are relevant:
+
+\begin{description}
+    \item[RRMod$_p$ (HMM):] The exact process. Predictive vectors live on the vertices of a $(p-1)$-simplex in $\mathbb{R}^p$: $\langle e_p^{(i)} | = (\mathbf{0}, \ldots, 1, \ldots, \mathbf{0})$ with the 1 at position $i$. We call $\{\langle e_p^{(i)} |\}_{i=0}^{p-1}$ the \emph{simplex} target.
+    \item[sRRMod$_p$ (EHMM):] An approximating process using a finite set of frequencies $\omega_1, \ldots, \omega_n$. For each $\omega$, the predictive vector at history index $i$ is $(\cos(2\pi\omega i/p), \sin(2\pi\omega i/p))$. Stacking across $n$ frequencies yields the \emph{polygon} target in $\mathbb{R}^{2n}$, a regular polygon trajectory on each circle.
+\end{description}
+
+These are two presentations of the same predictive distribution, related by the discrete Fourier transform on $\mathbb{Z}/p\mathbb{Z}$. The Dirichlet identity
+\begin{equation}\label{eq:dirichlet}
+    \mathbf{1}[c = c_0] \;=\; \frac{1}{p}\sum_{\omega=0}^{p-1}\cos\!\left(\frac{2\pi\omega(c - c_0)}{p}\right)
+\end{equation}
+expresses one simplex vertex as a complete Fourier sum over all $p$ frequencies. A partial Fourier sum over $\Omega \subsetneq \{0, \ldots, p-1\}$ is a \emph{smoothed delta}, a soft bump centred at $c_0$ that sharpens as $|\Omega|$ grows.
+
+\begin{remark}[$\mathcal{V}$ is a submanifold, not a subspace]
+$\mathcal{V}$ is a finite point set (RRMod$_p$) or a structured submanifold (sRRMod$_p$: an $n$-torus) embedded in $\mathbb{R}^D$. The linear-representation hypothesis below states that a linear projection of activations lands on this submanifold; it does not state that activations span a copy of it.
+\end{remark}
+
+\paragraph{The rep-theory frame.}\label{para:reptheory}
+The simplex basis $\{e_p^{(c)}\}_{c=0}^{p-1}$ is the standard basis of the \emph{regular representation} $\rho_{\mathrm{reg}}$ of $G = \mathbb{Z}/p\mathbb{Z}$ acting on itself by translation. By the fundamental theorem of representation theory,
+\begin{equation}\label{eq:regrep}
+    \rho_{\mathrm{reg}} \;\cong\; \bigoplus_{\rho \in \widehat{G}} (\dim \rho) \cdot \rho,
+\end{equation}
+where each irrep appears with multiplicity equal to its dimension. For abelian $G$ every irrep is 1-dimensional, a character $\chi_\omega(c) = e^{2\pi i \omega c / p}$, so $\rho_{\mathrm{reg}}$ contains every character exactly once.
+
+In this language: the simplex target equals the full $\rho_{\mathrm{reg}} = \bigoplus_{\omega=0}^{p-1} \chi_\omega$; the polygon target with frequencies $\Omega$ equals the subrepresentation $\bigoplus_{\omega \in \Omega} \chi_\omega$; \eqref{eq:dirichlet} is the change-of-basis between the regular representation in its standard basis and its decomposition into characters. Both architectures (as we will show) encode strict subrepresentations of $\rho_{\mathrm{reg}}$ and differ in how many characters they contain. The interpretive vocabulary ``compressive versus redundant'' (\cref{sec:economy}) corresponds in this language to ``smaller versus larger subrepresentation''. The formulation generalises immediately to non-abelian groups: the polygon target becomes matrix elements of selected $\rho \in \widehat{G}$, the simplex target remains the indicator basis, and the Phase~1 methodology transfers under the substitution ``frequencies $\omega_k \mapsto$ selected irreps $\rho_k$''. This is the form in which GCR \citep{chughtai2023toy} is naturally expressed.
+
+\paragraph{The linear-representation hypothesis.} The central claim is
+\begin{equation}\label{eq:lrh}
+    \exists\,W : \mathbb{R}^{d_{\mathrm{model}}} \to \mathbb{R}^D \quad \text{such that} \quad W \cdot a(x; \theta) \approx \langle v^{(x)} | \quad \forall x \in \mathcal{X}.
+\end{equation}
+The quality of the fit is measured by the $R^2$ of the corresponding ridge regression. Because activations live in $\mathbb{R}^{d_{\mathrm{model}}}$ (128 for the transformer, 512 for the MLP) while $\langle v^{(x)} |$ lives in much lower dimension ($D = 2n = 8$ or $20$), the linear map performs substantial compression, throwing away $\sim 90\%$ of the activation's dimensions. The hypothesis is that this compression is sufficient.
+
+\paragraph{Logits as a partial Fourier sum.} A Fourier-multiplication-style model produces logits
+\begin{equation}\label{eq:logits}
+    z(a, b, c) \;=\; \sum_{k=1}^{n} \alpha_k^2 \cos\!\left(\frac{2\pi\omega_k(a+b-c)}{p}\right),
+\end{equation}
+following \citet{nanda2023progress, poncini2025compmech}. Fitting \eqref{eq:logits} to the trained model's logits gives the learned frequencies $\{\omega_k\}$ and amplitudes $\{\alpha_k^2\}$.
+
+\paragraph{Geometric meaning of $\alpha_k^2$.} To produce \eqref{eq:logits}, the network must compute $\cos(2\pi\omega_k(a+b)/p)$ and $\sin(2\pi\omega_k(a+b)/p)$ for each $k$. These scalars occupy a 2-D (cosine, sine) plane inside $\mathbb{R}^{d_{\mathrm{model}}}$, and $\alpha_k^2$ is the squared activation-norm in that plane. Consequently:
+\begin{enumerate}
+    \item Sparse $\alpha_k^2$ spectrum $\Rightarrow$ a few planes dominate variance $\Rightarrow$ top PCs align with those planes $\Rightarrow$ PCA-restricted decoding works.
+    \item Spread $\alpha_k^2$ spectrum $\Rightarrow$ many planes carry similar variance $\Rightarrow$ top PCs are arbitrary rotations within the Fourier subspace $\Rightarrow$ PCA-restricted decoding fails even when full-dim decoding succeeds.
+\end{enumerate}
+This distinction makes the methodological choices in \cref{sec:methodology} principled rather than convenient.
+
+%----------------------------------------------------------------------
+\section{Setup and decoding methodology}\label{sec:methodology}
+%----------------------------------------------------------------------
+
+\subsection{Models and training}
+
+Both models are trained on all $p^2 = 12{,}769$ examples of modular addition mod $p = 113$ with full-batch AdamW (lr $10^{-3}$, weight decay $1.0$); test accuracy reaches $1.000$ at convergence for both. Checkpoints are saved every few epochs for the trajectory plots in \cref{sec:trajectory}.
+
+\paragraph{Transformer.} Single-layer, single-head, $d_{\mathrm{model}} = 128$, $d_{\mathrm{mlp}} = 512$, vocabulary $p + 1$ (with BOS), context length $3$. Sequences are $\texttt{BOS}\, a\, b\, c$ with cross-entropy on the last token. ${\sim}226$k parameters, 25{,}000 epochs. Architecture follows \citet{poncini2025compmech}.
+
+\paragraph{MLP.} Chughtai-style: per-token embeddings $W_a, W_b$ (each $p \times d_{\mathrm{hidden}}$), pre-activation $h = W_a[a] + W_b[b]$, post-activation $h' = \mathrm{ReLU}(h)$, linear unembed to $p$ logits. $d_{\mathrm{hidden}} = 512$ (matched to the transformer's $d_{\mathrm{mlp}}$), ${\sim}115$k parameters, 25{,}000 epochs.
+
+\paragraph{Grokking curves.} \Cref{fig:grokking} shows the training and test loss curves for both models. Each exhibits the canonical grokking signature: training loss falls rapidly to near zero (memorisation), test loss remains high for many epochs, and then collapses sharply once the model transitions to a generalising solution. Both architectures grok within roughly the same compute budget ($\sim 25{,}000$ epochs at the matched hyperparameters), confirming that the cross-architecture comparison in the rest of the report is between two genuinely grokked models rather than two models at different points in their training.
+
+\begin{figure}[ht]
+\centering
+\begin{subfigure}[t]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs_phase1/transformer_curves.png}
+    \caption{Transformer.}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs_phase1/mlp_curves.png}
+    \caption{MLP.}
+\end{subfigure}
+\caption{Training and test loss curves for the transformer and MLP on modular addition mod $p = 113$. Both models memorise early, plateau, and then grok to test accuracy $1.000$ by ${\sim}25{,}000$ epochs.}
+\label{fig:grokking}
+\end{figure}
+
+\subsection{Decoding pipeline}
+
+Given a model and an activation position:
+\begin{enumerate}[label=(\arabic*)]
+    \item \textbf{Fit logits.} Run on all $p^2$ pairs and fit \eqref{eq:logits} greedily to identify $\{\omega_k\}$ and $\{\alpha_k^2\}$ up to $R^2 = 0.99$ or $n_{\max} = 10$ frequencies. Logits are mean-centred per $(a,b)$ to remove the softmax gauge.
+    \item \textbf{Collect activations} into $X \in \mathbb{R}^{p^2 \times d}$.
+    \item \textbf{Build position-appropriate target} (\cref{tab:targets}); the simplex control at the readout position is $e_p[c] \in \mathbb{R}^p$.
+    \item \textbf{Ridge regression.} Fit $W$ such that $WX \approx Y$ with $\alpha = 10^{-3}$ for EHMM targets and $\alpha = 1$ for the simplex target.
+    \item \textbf{Compute and report $R^2$.}
+\end{enumerate}
+
+\begin{table}[ht]
+\centering
+\caption{Position-appropriate EHMM targets. Decoding at the wrong target gives $R^2 \approx 0$ even when the model represents the right one.}
+\label{tab:targets}
+\begin{tabular}{lll}
+\toprule
+\textbf{Position} & \textbf{Description} & \textbf{Target} \\
+\midrule
+POS1 (transformer) & Post-embedding, token $a$ & $\langle v^{(a)} |$ (single circle in $a$) \\
+POS2 (transformer) & Post-embedding, token $b$ & $\langle v^{(b)} |$ (single circle in $b$) \\
+POS3 (transformer) & Post-attention, token $b$ & $\langle v^{(a)} | + \langle v^{(b)} |$ (sum of two circles) \\
+POS4 (transformer) & Post-MLP, token $b$ & $\langle v^{(a+b \bmod p)} |$ (single circle in $c$) \\
+\midrule
+M1 (MLP) & Pre-ReLU & $\langle v^{(a)} | + \langle v^{(b)} |$ (sum of two circles) \\
+M2 (MLP) & Post-ReLU & $\langle v^{(a+b \bmod p)} |$ (single circle in $c$) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Two methodological refinements (Phase~1's contributions)}\label{sec:refinements}
+
+The original Poncini recipe uses a \emph{semi-supervised} decoder: PCA-reduce activations to the top $K$ principal components, then ridge-regress. This is sensible when the Fourier subspace is variance-concentrated in the top few PCs (transformer: $\alpha_k^2$ on $\sim 4$ modes), but fails for the MLP ($\alpha_k^2$ spread across ${\sim}10$ modes of similar amplitude; see \cref{fig:alpha}). Two changes apply uniformly to both architectures.
+
+\paragraph{Refinement 1: full-dimensional supervised regression.} Replace PCA $\to$ ridge with full-dimensional ridge ($\hat{Y} = W X$ using all of $\mathbb{R}^d$). This tests the actual linear-representation hypothesis \eqref{eq:lrh}, ``is the predictive vector linearly recoverable from the activation?'', rather than the strictly stronger claim ``is the representation concentrated in the top-$K$ variance directions?''. The two have the same answer for the transformer (both yes) and different answers for the MLP (yes / no).
+
+\paragraph{Refinement 2: class-mean activation pre-averaging at the readout.} At a layer where the target depends only on $c = a+b$, average the activation within each $c$-class before regression: $\bar{a}_c = \mathbb{E}_{(a,b):\,a+b\equiv c}[\,a(a,b;\theta)\,]$. The justification is mechanical: by the product-to-sum identity, the post-ReLU activation contains cross-terms $\cos(2\pi\omega_i a/p)\cos(2\pi\omega_j b/p)$, and averaging over $(a, b)$ with $a + b \equiv c$ collapses these as follows:
+\begin{itemize}
+    \item If $\omega_i = \omega_j = \omega$, the cross-term reduces to $\frac{1}{2}\cos(2\pi\omega c/p) + \text{const}$, a single-mode signal in $c$.
+    \item If $\omega_i \neq \omega_j$, the cross-term averages to zero.
+\end{itemize}
+The class-mean activation $\bar{a}_c$ therefore equals the partial Fourier sum in $c$ that the unembedding reads out, plus a $c$-independent constant. The per-$(a, b)$ residual is product-of-different-frequencies scaffolding orthogonal to every $(\cos\omega c, \sin\omega c)$ direction; it is real computational substrate but contributes nothing to the model's output. This is not a visualisation trick: the unembedding $W_U$ implicitly performs the same averaging, so class-meaning is the analyst's version of what the unembedding does.
+
+\Cref{sec:diagnostic} returns to this and proposes the gap between full-sample and class-mean $R^2$ as a quantitative diagnostic.
+
+%----------------------------------------------------------------------
+\section{Transformer results (Poncini replication)}\label{sec:transformer}
+%----------------------------------------------------------------------
+
+\subsection{Per-position EHMM decoding}
+
+\Cref{fig:t-summary} shows the top-2 PC scatter at each residual-stream position. POS1 and POS2 (post-embedding) show clean rings at $R^2 = 1.000$. POS3 (post-attention) shows the dense scatter expected from the sum-of-two-circles target. POS4 (post-MLP) shows a clean star-polygon at $R^2 = 0.987$: the model linearly encodes $\langle v^{(a+b)} |$ in its residual stream.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.85\textwidth]{figs_phase1/phase1_summary.png}
+\caption{Transformer: top-2-PC scatter at each residual-stream position. Top 2 PCs capture $17$--$23\%$ of total variance; the Fourier subspace is variance-concentrated.}
+\label{fig:t-summary}
+\end{figure}
+
+\begin{table}[ht]
+\centering
+\caption{Transformer: full-dimensional supervised $R^2$ for the EHMM target at each position, plus the simplex (HMM) control at POS4.}
+\label{tab:t-r2}
+\begin{tabular}{lc}
+\toprule
+\textbf{Position} & \textbf{$R^2$ (EHMM)} \\
+\midrule
+POS1, POS2 & $1.000$ \\
+POS3 & $\approx 1.000$ \\
+POS4 & $0.987$ \\
+\midrule
+POS4 simplex control & $0.149$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\Cref{tab:t-r2} reports the per-position full-dimensional supervised $R^2$ values. The EHMM/simplex separation at POS4 is approximately a factor of 7, the headline Poncini result.
+
+\subsection{Fitted frequencies and spurious harmonics}
+
+The logit fit identifies four dominant frequencies: at convergence, $\omega \in \{25, 31, 38, 41\}$ (specific values depend on seed, a manifestation of weak universality \citep{chughtai2023toy}; see \cref{sec:universality}). The $\alpha^2$ spectrum is shown in \cref{fig:alpha}; 4 modes carry essentially all the energy.
+
+When the fit is allowed up to $n_{\max} = 10$ frequencies, 6 additional small-$\alpha^2$ modes appear (e.g.\ $\omega \in \{15, 10, 23, 53, 38, 34\}$). These are not additional learned modes but arithmetic byproducts of $\cos(\omega_i \cdot)\cos(\omega_j \cdot)$ products generated by the MLP block. The diagnostic signature: per-frequency supervised $R^2$ at these modes caps at ${\approx}\,0.5$, the footprint of recovering only one of the two target dimensions (cosine but not sine), since product-to-sum yields sum/difference cosines but no sines. We therefore report $n = 4$ as the transformer's true frequency count.
+
+\subsection{Per-frequency decoding}
+
+\Cref{fig:t-grid} shows the per-frequency supervised $R^2$ heatmap across positions. Every cell is $\geq 0.98$: each individual frequency's $(\cos, \sin)$ plane is linearly recoverable in isolation. \Cref{fig:t-pairs} visualises this per frequency: for each fitted $\omega_k$, the theoretical predictive-vector target (left column of each subfigure) is shown alongside the model's fitted prediction (right column), with one row per frequency. The match is clean at POS2 (single circle in $b$), POS3 (rose pattern from the sum of two circles), and POS4 (single circle in $c$).
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.65\textwidth]{figs_phase1/phase1_per_freq_grid.png}
+\caption{Transformer: per-frequency supervised $R^2$ at each position. Cell $(i,j)$ is the supervised $R^2$ of regressing position $i$'s activations onto a 2-D target at frequency $\omega_j$.}
+\label{fig:t-grid}
+\end{figure}
+
+\begin{figure}[ht]
+\centering
+\begin{subfigure}[t]{0.32\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs_phase1/phase1_per_freq_pairs_pos2.png}
+    \caption{POS2: $\langle v^{(b)} |$, single circle.}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.32\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs_phase1/phase1_per_freq_pairs_pos3.png}
+    \caption{POS3: $\langle v^{(a)} | + \langle v^{(b)} |$, rose pattern.}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.32\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs_phase1/phase1_per_freq_pairs_pos4.png}
+    \caption{POS4: $\langle v^{(a+b)} |$, single circle in $c$.}
+\end{subfigure}
+\caption{Transformer per-frequency pairs. Left column of each subfigure: theoretical target. Right column: model's PCA-fitted prediction. $R^2 \approx 1$ on every row.}
+\label{fig:t-pairs}
+\end{figure}
+
+\subsection{Polygon width at POS4}
+
+At POS4 the per-frequency rings are not infinitely thin: each $c$-class produces a small cluster on the unit circle. \citet{poncini2025compmech} interpret this as the model's representational noise. We re-interpret it in \cref{sec:mlp-perfreq} as the trace of cross-term computational scaffolding generated by ReLU: with four dominant frequencies the transformer generates few cross-terms and the polygon width is small; with ten the MLP generates many more and the width is correspondingly larger. The shared mechanism makes class-meaning the appropriate fix for both.
+
+%----------------------------------------------------------------------
+\section{MLP results}\label{sec:mlp}
+%----------------------------------------------------------------------
+
+\subsection{Top-2 PC summary: blob, by design}
+
+\Cref{fig:m-summary} shows the M1 and M2 top-2 PC scatter, raw and class-mean. Both show blob-like distributions with EV $\approx 2$--$3\%$, in stark contrast to the transformer's $17$--$23\%$.
+
+\begin{figure}[ht]
+\centering
+\begin{subfigure}[t]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs_phase1/phase2_summary.png}
+    \caption{Raw $p^2$-point scatter, coloured by $c$.}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs_phase1/phase2_summary_classmean.png}
+    \caption{Class-mean version (M1 by $a$, M2 by $c$).}
+\end{subfigure}
+\caption{MLP top-2-PC scatter at M1 and M2. \emph{The blob is the finding}: with 10 fitted frequencies of similar amplitude, the 20-D Fourier subspace inside $\mathbb{R}^{512}$ has no dominant 2-D plane, and top-2-PC visualisation cannot resolve it.}
+\label{fig:m-summary}
+\end{figure}
+
+The blob is the direct visual signature of the spread-frequency representation. The contrast with the transformer's clean ring is itself the headline cross-architecture visual: \textbf{transformer = compressive Fourier basis; MLP = redundant Fourier basis}.
+
+\subsection{Fitted frequencies}
+
+The logit fit returns 10 frequencies of similar $\alpha^2$ amplitude, e.g.\ $\omega \in \{7, 14, 22, 25, 27, 33, 36, 41, 48, 51\}$ (seed-dependent). \Cref{fig:alpha} shows the contrast: 4 huge spikes versus 10 small-but-comparable bars.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.85\textwidth]{figs_phase1/phase3_alpha_comparison.png}
+\caption{Fitted Fourier amplitudes $\alpha^2$. Transformer (blue): ${\sim}10^5$ on 4 modes. MLP (orange): ${\sim}5\times 10^3$ across 10 modes.}
+\label{fig:alpha}
+\end{figure}
+
+\subsection{Per-frequency decoding}\label{sec:mlp-perfreq}
+
+\Cref{fig:m-grid} shows per-frequency supervised $R^2$ at M1 and M2. M1 is at $1.000$ on every fitted frequency; M2 caps at $0.81$--$0.88$ on the full sample.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.85\textwidth]{figs_phase1/phase2_per_freq_grid.png}
+\caption{MLP per-frequency supervised $R^2$ on the full $p^2$-sample.}
+\label{fig:m-grid}
+\end{figure}
+
+The per-frequency pairs plots with both refinements applied are shown in \cref{fig:m-pairs}: M1 uses full-dim supervised regression on the raw sample; M2 uses full-dim supervised regression on the class-mean activations.
+
+\begin{figure}[ht]
+\centering
+\begin{subfigure}[t]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs_phase1/phase2_per_freq_pairs_m1.png}
+    \caption{M1: supervised, full-sample. Rose patterns at $R^2 = 1.000$.}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs_phase1/phase2_per_freq_pairs_m2.png}
+    \caption{M2: supervised, class-mean by $c$. Rings at $R^2 = 1.000$.}
+\end{subfigure}
+\caption{MLP per-frequency pairs with methodological refinements. Left: theoretical target; right: model's supervised-fitted prediction.}
+\label{fig:m-pairs}
+\end{figure}
+
+The figures tell an unambiguous story: \textbf{the MLP linearly encodes each fitted Fourier mode at both layers, at $R^2 = 1.0$.} The earlier impression of inconclusiveness was an artefact of PCA-restricted regression (fails for spread-frequency representations) and full-sample regression at M2 (conflates cross-term scaffolding with target signal). With the refinements, MLP per-frequency cleanness matches the transformer's.
+
+\subsection{The simplex puzzle and its Dirichlet-kernel resolution}\label{sec:dirichlet}
+
+\Cref{fig:decoding-comparison} reports EHMM and simplex-control $R^2$ side by side.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.85\textwidth]{figs_phase1/phase3_decoding_comparison.png}
+\caption{Cross-architecture decoding $R^2$. Transformer EHMM/simplex gap at POS4: $0.99/0.15 \approx 7$. MLP at M2: $0.86/0.70 \approx 1.2$. The near-co-decodability of EHMM and simplex at M2 is the simplex puzzle.}
+\label{fig:decoding-comparison}
+\end{figure}
+
+A naive reading of the MLP column: ``the MLP has learned both presentations, so it has learned a different algorithm.'' This is wrong on two counts.
+
+\paragraph{Count 1 (category error).} EHMM and simplex are not competing DGPs; they are predictively-equivalent presentations of the same DGP, related by the discrete Fourier transform on $\mathbb{Z}/p\mathbb{Z}$. A model does not \emph{choose} between them. Asking ``did the model learn the EHMM or the simplex?'' is like asking ``did the model learn the function in Cartesian or polar coordinates?'': the question is malformed.
+
+\paragraph{Count 2 (Dirichlet kernel).} The simplex $R^2$ at a post-modular-sum layer measures \emph{Fourier-coverage breadth}, not algorithm choice. By \eqref{eq:dirichlet}, a one-hot at $c_0$ equals the complete Fourier sum over all $p$ frequencies; a partial sum over $\Omega$ approximates it, getting sharper as $|\Omega|$ grows. The post-modular-sum activation is approximately
+\begin{equation}
+    \mathrm{activation}(a, b) \;\approx\; \sum_{k \in \Omega} \alpha_k^2 \cos\!\left(\tfrac{2\pi\omega_k(a+b-c_0)}{p}\right) \cdot \text{(direction encoding mode } k\text{)},
+\end{equation}
+so the EHMM regression asks ``are these specific $(\cos\omega_k, \sin\omega_k)$ pairs present?'' (both architectures pass) while the simplex regression asks ``does the partial sum approximate a sharp one-hot?'' (quality grows with $|\Omega|$). Transformer: 4 modes $\Rightarrow$ blurry one-hot $\Rightarrow$ simplex $R^2 = 0.15$. MLP: 10 modes $\Rightarrow$ sharper one-hot $\Rightarrow$ simplex $R^2 = 0.70$. Both are doing the same thing; the MLP's broader Fourier coverage makes the simplex co-decodable as a side effect.
+
+\paragraph{Phrasing.} \emph{The EHMM $R^2$ probes which specific Fourier modes are present; the simplex $R^2$ probes how many. Both architectures pass the first; they differ on the second.}
+
+\subsection{The full-sample / class-mean $R^2$ gap as a new diagnostic}\label{sec:diagnostic}
+
+The M2 supervised $R^2$ is ${\sim}0.85$ on the full sample and ${\sim}1.00$ with class-mean pre-averaging. The $\sim 15\%$ gap is the variance contribution of cross-term scaffolding (products of different frequencies generated by ReLU) orthogonal to every $(\cos\omega c, \sin\omega c)$ direction (\cref{sec:refinements}). The same scaffolding exists in the transformer's post-MLP layer but is smaller (gap $\approx 1$--$2\%$) because of fewer modes generating cross-terms.
+
+We propose this gap as a quantitative diagnostic:
+\begin{equation}
+    \Delta_{\mathrm{scaffold}} \;\coloneqq\; R^2_{\mathrm{class\text{-}mean}} - R^2_{\mathrm{full\text{-}sample}}.
+\end{equation}
+$\Delta_{\mathrm{scaffold}}$ measures how much per-$(a,b)$ non-target variance the architecture's nonlinearity generates while producing the same predictive vector. It distinguishes ``how cleanly does the model represent the predictive vector?'' from ``how much intermediate computational debris does the model leave alongside the representation?''. These are different interpretability questions; existing single-$R^2$ diagnostics conflate them.
+
+%----------------------------------------------------------------------
+\section{Cross-architecture trajectories}\label{sec:trajectory}
+%----------------------------------------------------------------------
+
+While developmental tracking (joint LLC + belief geometry + unrolling) is out of scope, bare $R^2$ trajectories cost nothing once checkpoints are saved and make the static-phase conclusions visually direct.
+
+\paragraph{Pre-modular-sum (apples-to-apples).} \Cref{fig:traj-pre} shows the polygon and simplex $R^2$ trajectories at POS3 (transformer) and M1 (MLP).
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.95\textwidth]{figs_phase1/trajectory_comparison_pre_mlp.png}
+\caption{Pre-modular-sum belief-geometry trajectories. Transformer POS3 climbs to $R^2_{\mathrm{EHMM}} \approx 1$ over $\sim 5\mathrm{k}$ epochs; MLP M1 sits at $1.0$ throughout. Both show $R^2_{\mathrm{simplex}} = 0$.}
+\label{fig:traj-pre}
+\end{figure}
+
+Both architectures converge to identical signatures (EHMM $R^2 = 1$, simplex $R^2 = 0$), the apples-to-apples comparison the writeup leans on. The trajectories themselves differ informatively: the transformer has to \emph{learn} to preserve additive structure through softmax attention (POS3 starts at $R^2 \approx 0.65$ when attention is random and uniformly mixes tokens, and climbs to 1.0 as attention concentrates). The MLP gets the additive structure trivially: M1 is a linear projection of the concatenated embedding, and the additive predictive structure is preserved by any linear map (a Johnson--Lindenstrauss-style observation). M1's flat trajectory at 1.0 is therefore an architectural artefact.
+
+\paragraph{Post-modular-sum.} \Cref{fig:traj-post} shows the trajectories at POS4 (transformer) and M2 (MLP).
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.95\textwidth]{figs_phase1/trajectory_comparison.png}
+\caption{Post-modular-sum trajectories. Transformer POS4: EHMM $R^2 \approx 0.99$, simplex peaking briefly at $\approx 0.15$. MLP M2: EHMM $\approx 0.86$, simplex $\approx 0.70$. Both grok in approximately $25{\mathrm{k}}$ epochs.}
+\label{fig:traj-post}
+\end{figure}
+
+The MLP M2 polygon and simplex curves rise \emph{together} and saturate around the same time. Per \cref{sec:dirichlet}, both curves measure the same underlying property (Fourier-mode acquisition) with different probes: the polygon detects ``how cleanly are the specific modes present?''; the simplex detects ``how broad is the total coverage?''. Both grow as the model adds modes; they saturate at different values because the polygon probe asks a more stringent (mode-specific) question.
+
+\paragraph{Matched compute.} Both architectures reach test accuracy 1.0 at approximately $25{,}000$ epochs, with comparable parameter counts ($226$k vs.\ $115$k). The architectural difference is the variable being studied, everything else controlled.
+
+%----------------------------------------------------------------------
+\section{Interpretation and discussion}\label{sec:discussion}
+%----------------------------------------------------------------------
+
+\subsection{Both architectures implement Fourier multiplication on $\mathbb{Z}/p\mathbb{Z}$}
+
+The cross-architecture evidence points in a single direction: both architectures implement the same algorithmic family (Fourier multiplication on $\mathbb{Z}/p\mathbb{Z}$, the cyclic-group instantiation of \citet{chughtai2023toy}'s GCR), differing only in parameterisation:
+
+\begin{enumerate}
+    \item Same logit ansatz: both fit \eqref{eq:logits} to $R^2 \geq 0.97$.
+    \item Same EHMM target at the pre-modular-sum layer: POS3 and M1 both reach $R^2 = 1$ against $\langle v^{(a)} | + \langle v^{(b)} |$, $R^2 = 0$ against simplex.
+    \item Same per-frequency cleanness: $R^2 = 1$ for every fitted frequency at every appropriate layer, with refinements applied uniformly.
+    \item Same Dirichlet-kernel-driven asymmetry on simplex $R^2$, fully accounted for by $|\Omega|$.
+    \item Same grok time at matched compute.
+\end{enumerate}
+
+This answers the static-phase part of RQ1: \emph{the two architectures have learned the same algorithm}.
+
+\subsection{Representational economy: compressive versus redundant}\label{sec:economy}
+
+The architectures differ in \emph{how} they parameterise the algorithm. In the rep-theory frame (\cref{para:reptheory}), both encode strict subrepresentations of $\rho_{\mathrm{reg}}$ and differ in cardinality. We call this difference \emph{representational economy}:
+
+\begin{itemize}
+    \item \textbf{Compressive (transformer)}: $\bigoplus_{\omega \in \Omega_T} \chi_\omega$ with $|\Omega_T| = 4$; few high-amplitude modes, variance-concentrated in top PCs, low simplex co-decodability, small polygon-width / cross-term scaffolding, fast PCA-restricted decoding.
+    \item \textbf{Redundant (MLP)}: $\bigoplus_{\omega \in \Omega_M} \chi_\omega$ with $|\Omega_M| = 10$; many low-amplitude modes of similar weight, variance-spread, high simplex co-decodability, substantial polygon-width / cross-term scaffolding, requires full-dim regression.
+\end{itemize}
+
+Compressiveness makes the transformer easy to interpret (small enumerable basis, variance concentration so PCA-based tools work straightforwardly). Redundancy gains robustness: a partial-Fourier-sum approximation to one-hot serves as a usable backup decoding when the EHMM-aligned readout is partially perturbed. This is testable in later phases.
+
+\subsection{Connection to weak universality}\label{sec:universality}
+
+\citet{chughtai2023toy} observe weak but not strong universality: same algorithmic family across runs and architectures, but the specific representations vary. Our findings instantiate this at two levels:
+\begin{itemize}
+    \item Specific frequency choice varies across seeds (our transformer's $\{25, 31, 38, 41\}$ vs.\ Poncini's $\{49, 30, 25, 41\}$).
+    \item \emph{Number} of frequencies varies across architectures (10 vs.\ 4), a stronger form of variation than just ``which modes''.
+\end{itemize}
+
+\subsection{Why the cleanup is principled}\label{sec:principled}
+
+The natural concern is whether the refinements are principled or merely visualisation-convenient. Several considerations push against this. First, both are universal: full-dim supervised regression and class-meaning can be applied to either model; the transformer's results would not get worse under them (its full-dim $R^2$ is at least as high as the PCA-restricted, and class-meaning shrinks its polygon-width). Second, the choices test different hypotheses: PCA-restricted regression conflates ``is the representation present?'' with ``is it concentrated in top PCs?''. Separating them seems useful. Third, class-meaning has a mechanical justification, not just a visual one: it corresponds to the marginalisation implicitly performed by the unembedding, so the per-$(a,b)$ residual is by construction orthogonal to every direction the unembedding reads from. Finally, $\Delta_{\mathrm{scaffold}}$ is a new quantitative observable \emph{produced} by the methodological separation, not hidden by it.
+
+\subsection{What Phase~1 establishes for the broader programme}
+
+For RQ1, Phase~1 establishes:
+\begin{enumerate}
+    \item Belief geometry identifies the same algorithm in both architectures at convergence despite different parameterisations. The MLP analysis directly tests the model-agnostic claim: we read the algorithm out of activations without privileged access to weight structure.
+    \item A principled methodology for spread-frequency representations, generalising Poncini's pipeline. The two refinements transfer unchanged to non-abelian extensions ($S_5$, $S_6$), where the GCR/coset interpretive ambiguity (\citealp{chughtai2023toy, stander2024grokking, wu2024unified}) makes the model-agnostic test most acute.
+    \item A new diagnostic ($\Delta_{\mathrm{scaffold}}$) for cross-architecture comparison, quantifying post-nonlinearity computational scaffolding independently of representational quality.
+    \item Interpretive vocabulary (compressive versus redundant, polygon width as scaffolding, simplex $R^2$ as coverage breadth) for use in subsequent developmental analyses.
+\end{enumerate}
+
+Phase~1 does \emph{not} establish: when EHMM structure forms developmentally (requires the LLC); why the transformer chose 4 modes and the MLP chose 10 (lazy-to-rich / bifurcation question, RQ5--RQ6); which training examples drive Fourier-basis formation (RQ4, unrolling); the non-abelian test of model-agnosticism.
+
+%----------------------------------------------------------------------
+\section{Conclusion}
+%----------------------------------------------------------------------
+
+Phase~1 cleanly replicates \citet{poncini2025compmech} on the transformer and extends belief geometry to a Chughtai-style MLP, recovering the same algorithmic family (Fourier multiplication on $\mathbb{Z}/p\mathbb{Z}$) at a different point on the representational-economy spectrum (redundant rather than compressive). Two methodological refinements (full-dimensional supervised regression and class-mean activation pre-averaging) are required to read the MLP's representation cleanly; we argue these are principled (universal across architectures, hypothesis-separating, mechanically motivated by what the unembedding does) rather than visualisation-convenient. The full-sample/class-mean $R^2$ gap is proposed as a new diagnostic quantifying post-nonlinearity computational scaffolding.
+
+The central finding answers the static-phase part of RQ1 cleanly: \emph{the transformer and the MLP have learned the same algorithm}. The asymmetry visible in raw $R^2$ values at the post-modular-sum readout (simplex $0.15$ vs.\ $0.70$) is a Dirichlet-kernel-driven consequence of the architectures using different numbers of Fourier modes, not an algorithmic divergence. This establishes belief geometry as a model-agnostic tool of the kind RQ1 sets out to validate, at least for the cyclic-group case, and provides the methodological calibration baseline for the non-abelian extensions and the developmental analyses planned in later phases.
+
+%----------------------------------------------------------------------
+\bibliographystyle{plainnat}
+
+\begin{thebibliography}{99}
+
+\bibitem[Chughtai et~al.(2023)]{chughtai2023toy}
+Bilal Chughtai, Lawrence Chan, and Neel Nanda.
+\newblock A toy model of universality: Reverse engineering how networks learn group operations.
+\newblock \emph{arXiv preprint arXiv:2302.03025}, 2023.
+
+\bibitem[Nanda et~al.(2023)]{nanda2023progress}
+Neel Nanda, Lawrence Chan, Tom Lieberum, Jess Smith, and Jacob Steinhardt.
+\newblock Progress measures for grokking via mechanistic interpretability.
+\newblock \emph{arXiv preprint arXiv:2301.05217}, 2023.
+
+\bibitem[Poncini(2025)]{poncini2025compmech}
+Xavier Poncini.
+\newblock Computational mechanics for logits.
+\newblock \emph{PIBBSS Report}, October 2025.
+
+\bibitem[Shaffrey(2026)]{phase0_v2}
+Benjamin Shaffrey.
+\newblock Why does grokking happen? A mechanistic account via singular learning theory, computational mechanics, and training dynamics.
+\newblock \emph{Research proposal}, 2026.
+
+\bibitem[Stander et~al.(2024)]{stander2024grokking}
+Dashiell Stander, Qinan Yu, Honglu Fan, and Stella Biderman.
+\newblock Grokking group multiplication with cosets.
+\newblock \emph{Proceedings of the 41st International Conference on Machine Learning}, 2024.
+
+\bibitem[Wu et~al.(2024)]{wu2024unified}
+William Wu, Lukas Jaburi, Josh Drori, and Jesse Gross.
+\newblock Towards a unified and verified understanding of group-operation networks.
+\newblock \emph{arXiv preprint}, 2024.
+
+\end{thebibliography}
+
+\end{document}

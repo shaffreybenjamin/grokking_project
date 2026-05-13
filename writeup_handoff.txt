@@ -1,0 +1,557 @@
+================================================================================
+WRITEUP HANDOFF — Conceptual framing and findings from the static-phase work
+================================================================================
+
+PURPOSE
+-------
+This document is for an agent (or co-author) helping draft the thesis writeup
+of the belief-geometry / grokking work. It captures conceptual results,
+interpretive subtleties, and methodological decisions from the static-phase
+analysis. The companion file developmental_handoff.txt covers the per-checkpoint
+trajectory work; this file covers everything else worth saying in a writeup.
+
+Read alongside version_2.tex (the current draft proposal) and phase0_handoff.txt
+(the training-side baseline).
+
+
+================================================================================
+1. ONE-PARAGRAPH SUMMARY OF WHAT THE STATIC PHASE ESTABLISHED
+================================================================================
+
+A single-layer single-head transformer (Nanda/Poncini setup, d_model=128) and
+a Chughtai-style one-hidden-layer MLP (d_hidden=256 after retraining; was 512)
+were both trained to grok modular addition mod p=113 with matched
+hyperparameters. The static (final-checkpoint) belief-geometry analysis
+replicates Poncini (PIBBSS 2025) on the transformer cleanly — confirming that
+the model linearly represents the sRRMod_p EHMM predictive vectors at all four
+residual-stream positions and does NOT linearly represent the RRMod_p HMM
+simplex vectors. The MLP shows a structurally different picture: it linearly
+represents both the EHMM and the HMM simplex at the post-ReLU layer, not
+because it has learned a different algorithm, but because its broader Fourier-
+mode coverage makes the simplex linearly recoverable from its activations via
+the discrete Dirichlet-kernel identity. Both architectures are implementing
+the same algorithmic family (Fourier multiplication over Z/pZ); they differ
+in *representational economy* — the transformer commits to a minimal Fourier
+basis (4 dominant modes), the MLP uses a broader one (10+ similar-amplitude
+modes), in keeping with Chughtai's weak universality.
+
+
+================================================================================
+2. THE BELIEF GEOMETRY CONCEPTUAL FRAMEWORK (FOR WRITEUP CHAPTER 2)
+================================================================================
+
+This is the abstract framework that grounds the empirical work. Four distinct
+spaces are involved:
+
+  Space                         What lives there                     Defined by
+
+  Input space X                 token sequences (a, b, c ∈ Z/pZ)     the DGP
+  Parameter space Θ ⊂ R^P       model weights (P ≈ 226k transf.)    architecture
+  Activation space A_pos        intermediate activations a(x; θ)    arch + weights
+                                in R^d_model at chosen layer pos.
+  Belief / predictive-vector    comp-mech features of the process   the DGP only
+    space V
+
+The key conceptual move: V is determined entirely by the DGP, NOT by any model.
+It's a structured submanifold of some ambient R^D (NOT a linear subspace —
+this is a recurring confusion to head off in the writeup):
+
+  - RRMod_p HMM:  V is the finite set of p one-hot vectors at simplex vertices
+                  in R^p. "Simplex target" in our plots = elements of this set.
+  - sRRMod_p EHMM: V is a torus = product of n circles, embedded in R^(2n).
+                   "Polygon target" = points on this torus.
+
+These are TWO PRESENTATIONS of the same DGP — they produce identical
+conditional distributions P(future | history). In comp-mech terms they're
+"predictively equivalent". The writeup should be careful never to say "the
+HMM and the EHMM are two different DGPs"; they're two coordinate systems for
+one DGP.
+
+The central claim — the linear-representation hypothesis applied to NNs:
+
+  > There exists a linear map W: R^d_model -> R^D such that
+  > W · a(x; θ) ≈ ⟨v^(x)|  for all x ∈ X.
+
+The R² of the corresponding regression measures how well this hypothesis
+holds. R² ≈ 1: the model linearly encodes ⟨v^(x)| in its activations.
+R² ≈ 0: the model's activations don't linearly align with this V.
+
+The "linear" matters: activations are in R^d_model (e.g. 128 dims); V is
+typically much lower-dimensional (2n = 8 dims for our transformer); a linear
+projection compresses ~120 redundant dims away to land on V. The hypothesis
+is that this projection is sufficient — no non-linear transformation needed.
+
+
+================================================================================
+3. CORE TRANSFORMER FINDING (FOR THE RESULTS CHAPTER)
+================================================================================
+
+3.1 The trained transformer is a clean replication of Poncini Section 5
+
+    Per-position decoding R² (supervised, full d_model = 128 features):
+      POS1 (post-embed @ a): R²(EHMM) = 1.000
+      POS2 (post-embed @ b): R²(EHMM) = 1.000
+      POS3 (post-attention): R²(EHMM) = 0.9998 (additive target ⟨v(a)|+⟨v(b)|)
+      POS4 (post-MLP):       R²(EHMM) = 0.9930 (single-circle target ⟨v(c)|)
+      POS4 simplex control:  R²(simplex) = 0.145
+
+    The EHMM/HMM separation at POS4 is ~7x — the headline Poncini result.
+
+    Logit-fit Fourier modes: ω = (49, 30, 25, 41) with large α². Four modes,
+    not Poncini's five — both lie within the "3-7 modes" band typical of
+    p=113 modular-addition runs with different seeds. This is Chughtai weak
+    universality manifesting at the level of frequency count, not just choice.
+
+3.2 The 6 "extra" frequencies in our max_freqs=10 fit are spurious harmonics
+
+    With max_freqs=10 we get 6 additional frequencies (15, 10, 23, 53, 38, 34)
+    with much smaller α². These are NOT additional Fourier modes the model is
+    using — they are arithmetic byproducts of cos(ω₁)·cos(ω₂) products in the
+    MLP. Concrete checks:
+
+        49 + 30 = 79  →  113 − 79 = 34   ✓  (matches a fitted spurious mode)
+        49 + 41 = 90  →  113 − 90 = 23   ✓
+        49 + 25 = 74  →  113 − 74 = 39   ✗  (not in the list — not every
+                                             arithmetic combination shows up)
+
+    Diagnostic: per-frequency supervised R² for these spurious modes caps
+    at ≈ 0.5. That's the signature of recovering only ONE of the two target
+    dimensions — cos but not sin. The full cosine·cosine identity yields a
+    sum/difference cosine but no sine, so the spurious modes appear in
+    activations as cos-only signals, hence R² = 0.5 from linear regression
+    onto a 2-D (cos, sin) target.
+
+    Implication for writeup: when reporting "the model uses n frequencies",
+    say n = 4 for our transformer and explain that fits with larger
+    max_freqs pick up arithmetic harmonics that don't correspond to
+    additional learned representations.
+
+3.3 The cosine-only Poncini basis cannot reach R² = 1.0
+
+    Poncini's logit form z(a,b,c) = Σ α_k² cos(2π ω_k (a+b−c)/p) uses ONLY
+    cosines. Cosine is even in u = (a+b−c), so the basis can only fit
+    functions of u that are symmetric under u → −u. Real trained models
+    have small asymmetric (sine-of-u) residuals — adding more cosine
+    frequencies does NOT close this gap. For our transformer:
+
+        Logit-fit R² with  4 cosine modes ≈ 0.97
+        Logit-fit R² with 10 cosine modes ≈ 0.98
+        Logit-fit R² with 20 cosine modes ≈ 0.9878  (asymptote)
+
+    This is NOT a fitting bug; it's a basis-coverage issue. The model is
+    almost-but-not-quite symmetric in (a+b−c). For the writeup: if R²=0.99
+    is presented as the success criterion, note that Poncini's specific
+    model achieves it; ours asymptotes just below. Adding a sine basis
+    would close the gap but diverges from Poncini's exact convention.
+
+3.4 The "polygon width" at POS4 is real and Poncini-consistent
+
+    Per-frequency PCA-fitted plots at POS4 show *thick rings* rather than
+    infinitely-thin circles for the top 4 frequencies. This is Poncini's own
+    observation: the MLP's modular-sum implementation doesn't produce an
+    infinitely-sharp ⟨v(a+b)| — it produces an approximate version with
+    non-trivial spread. This is interpretive content for the writeup: the
+    polygon width is the model's "representational noise" at the post-modular-
+    sum layer, and is visible because the MLP can only approximate the cosine-
+    of-sum identity via its ReLU non-linearity.
+
+
+================================================================================
+4. CORE MLP FINDING (FOR THE RESULTS CHAPTER)
+================================================================================
+
+4.1 The MLP uses 10+ Fourier modes of similar amplitude
+
+    Fitted ω = (22, 33, 41, 16, 51, 7, 36, 27, 19, 48) with α² spread roughly
+    uniformly across them. Per-frequency supervised R²:
+
+        At M1 (pre-ReLU):  R² = 1.000 for every fitted ω
+        At M2 (post-ReLU): R² ≈ 0.85 for every fitted ω
+
+    Every fitted frequency is a genuine learned mode — no spurious-harmonic
+    pattern like the transformer. This is Chughtai weak universality at its
+    most spread-out: same algorithmic family (Fourier multiplication), but
+    distributed across many frequencies rather than concentrated on a few.
+
+4.2 The MLP DOES linearly represent the simplex (and this is informative)
+
+    At M2: R²(EHMM) ≈ 0.86 AND R²(simplex) ≈ 0.69.
+
+    This is the empirical fact that most needs careful interpretation in the
+    writeup. The naive reading — "the MLP has learned both DGPs" — is
+    incorrect on two counts:
+      (a) the EHMM and HMM-simplex are predictively-equivalent presentations
+          of one DGP (see §2), so "learned both DGPs" is a category error;
+      (b) high R²(simplex) at M2 doesn't indicate algorithm choice — it's a
+          consequence of representation breadth.
+
+    The correct explanation is the discrete Dirichlet-kernel identity:
+
+        one_hot(c = c_0) = (1/p) Σ_{ω=0}^{p-1} cos(2π ω (c − c_0)/p)
+
+    A one-hot at c_0 is exactly a Fourier sum over ALL p frequencies. A
+    *partial* Fourier sum is a smoothed delta — narrower with more frequencies.
+    So:
+
+      - Transformer at POS4 represents ~4 frequencies → soft-delta projection
+        onto the simplex is broad → linear regression to one-hot gives R²≈0.15
+      - MLP at M2 represents 10+ frequencies → sharper soft-delta → linear
+        regression to one-hot gives R²≈0.69
+
+    Same algorithmic family (Fourier multiplication), same DGP, but DIFFERENT
+    representational economy. The transformer is *compressive* (commits to a
+    minimal basis); the MLP is *redundant* (uses a broader basis). The high
+    simplex R² is a measure of Fourier-coverage breadth, NOT a measure of
+    HMM-style algorithm choice.
+
+    Writeup angle: this reframes Poncini's simplex R² as a "compression-
+    sensitive diagnostic" rather than a clean DGP discriminator. Low simplex
+    R² (transformer) → compressive Fourier basis. High simplex R² alongside
+    high EHMM R² (MLP) → broad Fourier coverage. The asymmetry between the
+    two architectures is therefore evidence about representational economy,
+    not about which DGP each one chose.
+
+4.3 The d_hidden=512 dilution problem and the retrain at d_hidden=256
+
+    The original MLP was trained at d_hidden=512. With 10 frequencies × 2
+    dims = 20-D Fourier subspace embedded in 512-D activation space, no
+    single PC aligned with a single frequency's (cos, sin) plane — top-10
+    PCs returned linear combinations across multiple frequencies, and
+    per-frequency PCA-fitted plots returned junk for every row (the SAME
+    junk pattern regardless of which ω the row claimed to be analysing).
+
+    Diagnostic that this was a PCA-coverage issue, not a representation
+    failure: per-frequency *supervised* R² at M1 was 1.000 for every
+    fitted ω. The model represented the frequencies; the top 10 PCs
+    just didn't isolate them.
+
+    Two fixes in scope: (i) raise n_pcs to ~40 (enough to span the 20-D
+    Fourier subspace); (ii) retrain at smaller d_hidden so the representation
+    concentrates. The user did both — n_pcs=40 in the static plotting, plus
+    a retrain at d_hidden=256 (matches Chughtai's reference setup). Trained
+    for 100k epochs to ensure full grokking.
+
+    Writeup angle: this is a useful methodological point about model
+    selection for interpretability — smaller models force concentration
+    of representations, which makes the inverse problem (reading the
+    algorithm out of activations) more tractable. There's a real tension
+    between "expressive enough to grok" and "concentrated enough to
+    interpret" that the writeup should acknowledge.
+
+4.4 Position-mismatch artifact (POS4 vs M2)
+
+    POS4 (transformer) and M2 (MLP) are both immediately before unembed.
+    But the transformer's POS4 is a residual stream — it still carries
+    POS3's additive structure. The MLP's M2 has no residual — it IS the
+    entire pre-unembed signal. So at M2 the activations are essentially
+    W_U^+ · one_hot(c), which trivially supports both EHMM and simplex
+    decoding. POS4 retains the additive structure cleanly.
+
+    For a fair cross-architecture comparison, decode at the pre-MLP layer
+    in each model:
+        Transformer: POS3 (post-attention, pre-MLP-block)
+        MLP:        M1   (pre-ReLU)
+
+    At those layers, both architectures show R²(EHMM) climbing to ~1 and
+    R²(simplex) staying near 0. This is the apples-to-apples comparison
+    and it confirms both architectures form the same additive predictive
+    structure ⟨v(a)|+⟨v(b)| before the modular-sum non-linearity.
+
+
+================================================================================
+5. THE FOUR PONCINI FIGURE REPLICATIONS (FOR THE RESULTS CHAPTER)
+================================================================================
+
+  Poncini Fig 2  (training trajectory): R²(EHMM) and R²(simplex) at POS4 over
+                 training. Replicated exactly for the transformer: sharp
+                 polygon climb to 0.99 by epoch ~5000, simplex peaks at ~0.15
+                 then settles ~0.12. For the MLP at M2: both curves rise (per
+                 §4.2). For the MLP at M1 (cleaner fair comparison): EHMM
+                 climbs to ~1, simplex stays near 0.
+
+  Poncini Fig 3  (per-frequency post-MLP): with max_freqs=4 the transformer
+                 plot shows 4 clean rings, each row a frequency, with the
+                 PCA-fitted column showing thick rings ("polygon width") and
+                 supervised R² ≈ 0.99 per row.
+
+  Poncini Fig 4  (per-frequency post-embed): transformer POS2 shows 4 very
+                 clean thin rings, R² ≈ 1.0 per frequency.
+
+  Poncini Fig 5  (per-frequency post-attention): transformer POS3 shows
+                 4 clean rose/petal patterns (the sum-of-two-circles target),
+                 R² ≈ 1.0 per frequency.
+
+  All four replicated cleanly after the two static-phase fixes
+  (transformer max_freqs=4, MLP n_pcs=40 for per-frequency PCA).
+
+
+================================================================================
+6. METHODOLOGICAL SUBTLETIES TO WRITE UP CAREFULLY
+================================================================================
+
+6.1 The position-appropriate EHMM target
+    POS1, POS2 → single-circle target indexed by the position's natural index
+    POS3, M1   → additive ⟨v(a)|+⟨v(b)| (sum-of-two-circles, rose curve)
+    POS4, M2   → single-circle ⟨v(a+b mod p)|
+    Decoding at the wrong target gives R²=0 even when the model represents
+    the right one (this was caught when an early version of the trajectory
+    code tried v[c] at POS3 and produced uniformly-zero R²).
+
+6.2 Ridge regression numerics
+    Ridge alpha = 1e-3 for EHMM (20-D, well-conditioned).
+    Ridge alpha = 1.0 for simplex (113 one-hot columns, ill-conditioned at
+    untrained checkpoints — alpha=1e-3 produces negative R² spikes from the
+    Cholesky solver running on rank-deficient activations).
+    Both settings agree to ~0.005 at converged checkpoints, so no comparability
+    cost.
+
+6.3 Supervised vs semi-supervised decoding
+    Supervised  = full activations → target via ridge.  Tests whether the
+                  representation IS THERE.
+    Semi-supervised = PCA(n_pcs) → ridge → target.  Tests whether the
+                  representation is in the top-K PCs (i.e. is dominant).
+    For sparse-frequency models (transformer): top-K PCs concentrate on
+    learned frequencies, so n_pcs ≈ 2 · n_freq suffices.
+    For spread-frequency models (MLP): PCs are linear combinations of many
+    frequencies and don't isolate individual ones; n_pcs needs to span the
+    full Fourier subspace.
+
+6.4 Per-frequency R² ≈ 0.5 = cos-only signal
+    The signature "supervised R² ≈ 0.5 against a 2-D (cos, sin) target"
+    means the regression recovers EITHER cos OR sin but not both.
+    Causes: (a) the frequency is a cosine·cosine harmonic byproduct
+    (transformer §3.2); (b) the model represents only a partial phase of
+    the frequency. Worth flagging this signature in the writeup as a
+    distinguishable footprint.
+
+6.5 Logit gauge fixing
+    Softmax is invariant under per-(a,b) additive shifts in logits. The
+    fit_frequencies routine mean-centres logits per (a,b) before fitting.
+    This makes the cumulative R² scale-invariant and gauge-invariant.
+
+
+================================================================================
+7. INTERPRETIVE CAUTIONS — THINGS THE WRITEUP COULD EASILY MISSTATE
+================================================================================
+
+7.1 "The transformer learned the EHMM and not the HMM" — NO.
+    Both EHMM and HMM are presentations of the same DGP. The transformer
+    *represents the process* using a polygon-style coordinate system; it
+    doesn't choose between two competing DGPs. Phrase as "the transformer's
+    activations are linearly aligned with the EHMM presentation but not
+    with the HMM-simplex presentation" or "the model commits to a Fourier-
+    basis representation, not a one-hot-basis representation".
+
+7.2 "The MLP learned both DGPs" — NO.
+    The MLP represents the same single DGP using a broader Fourier basis;
+    the simplex linear-recoverability is a Dirichlet-kernel side effect of
+    that broad coverage (see §4.2). Phrase as "the MLP's broader Fourier
+    coverage makes both presentations linearly accessible from its
+    activations, indicating low representational economy rather than
+    distinct algorithm choice".
+
+7.3 "Belief geometry is a subspace of R^D" — NO.
+    It's a structured submanifold (or finite point set) in ambient R^D, not
+    a linear subspace. For RRMod_p it's a finite set of simplex vertices;
+    for sRRMod_p it's a torus. The linear-representation hypothesis is that
+    a linear projection of activations lands ON this manifold, not that
+    activations span a copy of it.
+
+7.4 "Belief geometry analysis requires knowing the DGP" — STRICTLY YES,
+    BUT...
+    The canonical predictive vector ⟨v^(w)| is defined in terms of the
+    process's transition matrices, so without the DGP you cannot write
+    down V explicitly. But:
+      (a) CSSR-style empirical causal-state reconstruction recovers an
+          empirical V from data alone.
+      (b) Candidate-DGP comparison: posit a family of candidates, derive
+          each one's V, pick the best linear fit.
+      (c) The methodology (regression, polygon-width diagnostics, per-
+          frequency analysis) is process-agnostic and transfers.
+    The toy-case work is therefore a tool-building exercise that grounds
+    the bootstrap to unknown-DGP cases — see §8.
+
+7.5 "More frequencies = more complex algorithm" — NOT NECESSARILY.
+    The transformer uses 4 frequencies and groks; the MLP uses 10+ and
+    grokks. The MLP isn't doing a more complex algorithm — it's doing the
+    same algorithm with more representational redundancy. n_dominant (the
+    threshold-free count of "frequencies with α² > 10% of max α²") is the
+    better complexity measure than raw frequency count.
+
+
+================================================================================
+8. THE BOOTSTRAP PROGRAMME (FOR THE DISCUSSION / FUTURE-WORK CHAPTER)
+================================================================================
+
+The thesis-level research direction: use belief-geometry tools to *reverse-
+engineer the DGP* from a trained model's activations on data alone, building
+on the toy-case validation that's been done.
+
+8.1 Why this is well-posed
+    Toy cases provide ground truth: we know the DGP, so "did the bootstrap
+    recover it?" is a falsifiable question. Plus, trained models are
+    learned compressions of conditional distributions, so model activations
+    are a denoised summary of empirical statistics — using model + data
+    jointly is more identifiable than data-only causal-state reconstruction.
+
+8.2 What the toy-case work has built
+    A calibrated toolkit:
+      - regression-based decoding pipeline (supervised + semi-supervised)
+      - per-frequency analysis with PCA→ridge
+      - polygon-width / harmonic / spurious-mode diagnostics
+      - position-by-position decomposition (where in the network the
+        representation lives)
+      - developmental signatures (n_dominant, α-entropy, etc.)
+    Plus an interpretive vocabulary: "compressive vs redundant Fourier
+    coverage", "additive vs post-modular-sum positions", "polygon width
+    as representational noise".
+
+8.3 The natural three-paper structure
+    Paper 1 (WHAT):  Catalogue geometric signatures across a small library
+                     of known DGPs (cyclic, non-abelian, mixtures, factored).
+                     Establish robustness to architecture, seed,
+                     hyperparameters.
+    Paper 2 (INVERSE): Given activations + data only, identify which DGP
+                     family best explains the model. Validate on held-out
+                     toy cases.
+    Paper 3 (EXTEND): Apply to cases where the catalogue doesn't already
+                     contain the right DGP. Demonstrate identification of
+                     structural features (symmetry group, factor count,
+                     ergodicity) without naming the specific process.
+
+8.4 Hard parts to be honest about
+    (a) Predictive equivalence: multiple DGPs can give identical
+        conditional distributions; the "right" target is the equivalence
+        class, not a specific presentation.
+    (b) Approximate processes: natural data isn't a GHMM; the bootstrap
+        will need to handle "this model represents *something approximately
+        like* an EHMM with these symmetries" rather than producing a clean
+        process specification.
+    (c) Weak universality: same DGP + same architecture, different seeds,
+        give different specific Fourier-basis representations. The bootstrap
+        must read out the FAMILY (EHMM-on-cyclic-group) without depending
+        on the specific parameterisation.
+    (d) Natural-language LLMs are not in initial scope — graduate up a
+        complexity ladder: cyclic groups → non-abelian (S_n) → mixtures →
+        factored / hierarchical → eventually language. Each rung is its
+        own contribution.
+
+8.5 Connection to alignment / interpretability
+    If you can identify what statistical structure a model is exploiting,
+    you can ask whether it's the structure you intended. This is the
+    interpretability-and-safety angle. Belief geometry as a model-agnostic
+    algorithm-identification tool is the contribution.
+
+
+================================================================================
+9. CONNECTIONS TO LITERATURE
+================================================================================
+
+  Poncini (2025 PIBBSS report)
+      Primary thing being replicated and extended. Section 5 is the static-
+      phase analysis target. We replicate the transformer findings; we extend
+      to the MLP and show the position-matters / Dirichlet-kernel story.
+
+  Chughtai et al. (2023) — "A toy model of universality"
+      Weak universality: same algorithmic family across runs/architectures
+      but specific representations differ. Both the transformer's frequency
+      count (4 vs Poncini's 5) and the MLP's spread coverage (10+ vs the
+      transformer's 4) instantiate this finding.
+
+  Shai et al. — belief state geometry in transformers
+      The original linear-representation-of-predictive-vectors finding.
+      Mess3 process is their canonical example. Our cyclic-group setup is
+      the modular-addition analogue.
+
+  Piotrowski et al. — constrained belief updates
+      The mechanism by which the attention layer constructs belief features
+      from raw embeddings. Relevant for explaining WHY POS3 has the additive
+      structure and POS4 the modular-sum structure.
+
+  Stander et al. (2024) / Wu et al. (2024) — coset circuits / ρ-set circuits
+      Alternative interpretations of group-multiplication networks. The
+      belief-geometry approach is complementary: it reads the algorithm out
+      of activations geometrically rather than from weight inspection, and
+      so can in principle adjudicate between weight-level interpretations.
+
+  Nanda et al. (2023) — progress measures for grokking
+      Fourier-mode analysis of grokking transformers. Our logit-fit
+      machinery is the comp-mech-style formalisation of his Fourier
+      progress measure.
+
+  Crutchfield — CSSR / causal-state reconstruction
+      The empirical-V construction from data alone (no DGP needed). The
+      bootstrap programme of §8 builds on this.
+
+  Kumar et al. (2024) — lazy-to-rich grokking
+      Frames grokking as a phase transition. Belief geometry should track
+      this transition (developmental phase, see developmental_handoff.txt).
+
+
+================================================================================
+10. SUGGESTED CHAPTER STRUCTURE FOR THE STATIC-PHASE WRITEUP
+================================================================================
+
+  Section A. Belief geometry: the framework
+      - The four spaces (§2)
+      - The linear-representation hypothesis (§2)
+      - V as a submanifold not subspace (§7.3)
+      - HMM and EHMM as predictively-equivalent presentations (§7.1, §7.2)
+
+  Section B. Method
+      - Logit fitting: Poncini's cosine basis, gauge fixing, why R² caps
+        below 1 (§3.3)
+      - Per-position decoding: supervised vs semi-supervised (§6.3)
+      - Per-frequency analysis: ring/rose targets (§6.1, §6.4)
+      - Architectural considerations: position-appropriate targets, residual
+        stream vs feedforward (§4.4)
+
+  Section C. Transformer results (replication of Poncini)
+      - Per-position decoding R² (§3.1)
+      - The 4 dominant frequencies and the 6 spurious harmonics (§3.2)
+      - Polygon width at POS4 (§3.4)
+      - The training trajectory (§5, Poncini Fig 2)
+
+  Section D. MLP results (the new finding)
+      - Per-position decoding R² and the high simplex R² puzzle (§4.1, §4.2)
+      - The Dirichlet-kernel resolution (§4.2)
+      - The d_hidden=512 → 256 retrain story and what it teaches about
+        model selection for interpretability (§4.3)
+      - The pre-modular-sum comparison (POS3 ↔ M1) (§4.4)
+
+  Section E. Cross-architecture comparison
+      - The transformer is compressive; the MLP is redundant (§4.2)
+      - Both are Fourier-multiplication on Z/pZ — weak universality (§1, §3.1, §4.1)
+      - The simplex R² is a compression-sensitivity diagnostic, not a DGP
+        discriminator (§4.2, §7.2)
+
+  Section F. Discussion: the bootstrap programme
+      - Why belief geometry generalises beyond known DGPs (§7.4)
+      - Toy-case validation as a tool-building strategy (§8.2)
+      - The three-paper sequence and what's missing (§8.3, §8.4)
+
+
+================================================================================
+11. NUMERIC SUMMARY TABLE (FOR CITATION IN THE WRITEUP)
+================================================================================
+
+  Transformer (d_model=128, p=113, 25k epochs)
+      Test accuracy at convergence:              1.000
+      Logit-fit R² with 4 modes:                ~0.97
+      Logit-fit R² with 20 modes:                0.9878  (asymptote)
+      Dominant frequencies (ω):                  49, 30, 25, 41
+      Per-position EHMM decoding R²:
+          POS1, POS2:                            1.000
+          POS3:                                  0.9998
+          POS4:                                  0.9930
+      POS4 simplex control R²:                   0.145
+
+  MLP (d_hidden=256 after retrain, p=113, 100k epochs)
+      Test accuracy at convergence:              1.000
+      Fitted frequencies (10 modes, similar α): 22, 33, 41, 16, 51, 7, 36, 27, 19, 48
+      Per-frequency supervised R² at M1:         1.000 (all modes)
+      Per-frequency supervised R² at M2:         ~0.85 (all modes)
+      M2 EHMM R²:                                0.86
+      M2 simplex R²:                             0.69
+      M1 EHMM R²:                               ~1
+      M1 simplex R²:                            ~0   (the clean comparison)
